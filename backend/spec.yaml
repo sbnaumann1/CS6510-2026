@@ -1,0 +1,436 @@
+openapi: 3.0.3
+info:
+  title: Self-Checkout System API
+  version: "1.0.0"
+  description: |
+    Shared API contract for the semester-long self-checkout project.
+
+    Every architecture-week implementation (monolith, layered, service-based,
+    orchestration-driven SOA, microservices, event-driven, ...) MUST implement
+    this exact contract. The client and grading harness are written once,
+    against this spec, and are never changed between weeks — only the
+    server-side architecture changes. This is what makes week-to-week
+    comparison meaningful.
+
+    ## Domain model
+
+    - The store has a fixed catalog of items (SKU, name, price) and a stock
+      count per SKU.
+    - A customer at a station starts a transaction, scans items one at a time
+      (one scan call = one physical unit added to the basket), then completes
+      the transaction to pay.
+    - Stock is decremented at **completion** time, once per scanned unit —
+      not at scan time. A physical customer already has the item in hand at
+      scan time; the backend's job is to keep an accurate, non-negative stock
+      count, not to gate the scan itself.
+    - Implementations MUST NOT let a SKU's stock go negative, and the sum of
+      all completed-transaction decrements for a SKU plus its final stock
+      MUST equal its starting stock. Under concurrent load across many
+      stations this is the correctness property most naive implementations
+      violate — that is intentional and is part of the exercise.
+    - Low-stock alerts are generated whenever a SKU's stock drops below a
+      configurable threshold, and are queryable after the fact.
+    - "Popular items" are tracked over a sliding window of the most recent
+      item scans (not transactions), recomputed every N scans (a hopping
+      window), and are queryable after the fact.
+
+    ## Synchronicity
+
+    Every endpoint in this spec is synchronous request/response, regardless
+    of the internal architecture used to implement it. Internally, a given
+    week's implementation may use events, message brokers, or orchestration
+    engines — but the client-facing contract never changes. This lets the
+    same load-testing client run unmodified against every week's system.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: catalog
+  - name: transactions
+  - name: inventory
+  - name: analytics
+
+paths:
+  /items:
+    get:
+      tags: [catalog]
+      summary: List the full item catalog
+      description: >
+        Returns every item in the store's catalog. The load-testing client
+        fetches this once at startup to build its randomized scan generator.
+      responses:
+        "200":
+          description: Catalog retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogResponse"
+              example:
+                items:
+                  - sku: "SKU-000123"
+                    name: "Whole Milk 1L"
+                    price: 1.85
+                  - sku: "SKU-000124"
+                    name: "Sourdough Loaf"
+                    price: 3.40
+
+  /transactions:
+    post:
+      tags: [transactions]
+      summary: Start a new transaction at a station
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartTransactionRequest"
+      responses:
+        "201":
+          description: Transaction started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        "400":
+          description: Invalid request (e.g. missing stationId)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/{transactionId}/items:
+    post:
+      tags: [transactions]
+      summary: Scan one unit of an item into the basket
+      description: >
+        Each call represents scanning exactly one physical unit. To scan two
+        of the same SKU, call this endpoint twice.
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanItemRequest"
+      responses:
+        "200":
+          description: Item scanned and added to the basket
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResult"
+        "404":
+          description: Transaction or SKU not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Transaction is not open (already completed or cancelled)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/{transactionId}/complete:
+    post:
+      tags: [transactions]
+      summary: Complete the transaction, take payment, and decrement stock
+      description: >
+        Finalizes the transaction. For every scanned unit, the corresponding
+        SKU's stock is decremented by one. Payment is assumed to always
+        succeed in this simulation — there is no payment failure path.
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Transaction completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Receipt"
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: >
+            Transaction cannot be completed (already completed/cancelled, or
+            basket is empty)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /transactions/{transactionId}:
+    get:
+      tags: [transactions]
+      summary: Get current transaction status (debugging / instructor use)
+      description: >
+        Not exercised by the load-testing client's main workload; provided
+        for manual debugging while implementing each week's system.
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Transaction found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /inventory/low-stock:
+    get:
+      tags: [inventory]
+      summary: List current low-stock alerts
+      parameters:
+        - name: threshold
+          in: query
+          required: false
+          description: >
+            Optional override of the low-stock threshold for this query only.
+            If omitted, the server's configured default threshold is used.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Low-stock alerts retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LowStockResponse"
+
+  /analytics/popular-items:
+    get:
+      tags: [analytics]
+      summary: Get the most popular items in the current sliding window
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of items to return, ranked by scan count.
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Popular items retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PopularItemsResponse"
+
+components:
+  parameters:
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    CatalogItem:
+      type: object
+      required: [sku, name, price]
+      properties:
+        sku:
+          type: string
+        name:
+          type: string
+        price:
+          type: number
+          format: double
+
+    CatalogResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogItem"
+
+    StartTransactionRequest:
+      type: object
+      required: [stationId]
+      properties:
+        stationId:
+          type: string
+          description: Identifier of the physical (simulated) checkout station.
+          example: "station-07"
+
+    Transaction:
+      type: object
+      required: [transactionId, stationId, status, itemCount, runningTotal, startedAt]
+      properties:
+        transactionId:
+          type: string
+        stationId:
+          type: string
+        status:
+          type: string
+          enum: [OPEN, COMPLETED, CANCELLED]
+        itemCount:
+          type: integer
+          description: Number of units scanned so far.
+        runningTotal:
+          type: number
+          format: double
+        startedAt:
+          type: string
+          format: date-time
+
+    ScanItemRequest:
+      type: object
+      required: [sku]
+      properties:
+        sku:
+          type: string
+
+    ScanResult:
+      type: object
+      required: [transactionId, sku, name, unitPrice, itemCount, runningTotal]
+      properties:
+        transactionId:
+          type: string
+        sku:
+          type: string
+        name:
+          type: string
+        unitPrice:
+          type: number
+          format: double
+        itemCount:
+          type: integer
+          description: Total units scanned in this transaction so far (including this one).
+        runningTotal:
+          type: number
+          format: double
+
+    ReceiptLine:
+      type: object
+      required: [sku, name, unitPrice, quantity]
+      properties:
+        sku:
+          type: string
+        name:
+          type: string
+        unitPrice:
+          type: number
+          format: double
+        quantity:
+          type: integer
+
+    Receipt:
+      type: object
+      required: [transactionId, stationId, itemCount, totalAmount, startedAt, completedAt, lines]
+      properties:
+        transactionId:
+          type: string
+        stationId:
+          type: string
+        itemCount:
+          type: integer
+        totalAmount:
+          type: number
+          format: double
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReceiptLine"
+
+    LowStockAlert:
+      type: object
+      required: [sku, name, currentStock, threshold, triggeredAt]
+      properties:
+        sku:
+          type: string
+        name:
+          type: string
+        currentStock:
+          type: integer
+        threshold:
+          type: integer
+        triggeredAt:
+          type: string
+          format: date-time
+
+    LowStockResponse:
+      type: object
+      required: [threshold, generatedAt, alerts]
+      properties:
+        threshold:
+          type: integer
+        generatedAt:
+          type: string
+          format: date-time
+        alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/LowStockAlert"
+
+    PopularItem:
+      type: object
+      required: [sku, name, scanCount, rank]
+      properties:
+        sku:
+          type: string
+        name:
+          type: string
+        scanCount:
+          type: integer
+        rank:
+          type: integer
+
+    PopularItemsResponse:
+      type: object
+      required: [windowSize, slideInterval, windowStart, windowEnd, computedAt, items]
+      properties:
+        windowSize:
+          type: integer
+          description: Number of most-recent item scans considered (e.g. 1000).
+        slideInterval:
+          type: integer
+          description: How often the window is recomputed, in scans (e.g. 500).
+        windowStart:
+          type: integer
+          description: Global scan sequence number at the start of the current window.
+        windowEnd:
+          type: integer
+          description: Global scan sequence number at the end of the current window.
+        computedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PopularItem"
+
+    ApiError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: "TRANSACTION_NOT_OPEN"
+        message:
+          type: string
+          example: "Transaction tx-4821 is already completed."
