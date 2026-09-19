@@ -1,2 +1,4 @@
 load-client/out/
 mockserver/out/
+
+.claude/
