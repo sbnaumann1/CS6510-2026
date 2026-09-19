@@ -76,6 +76,95 @@ cd ../backend && uv run python scripts/verify_invariant.py
 
 Stress run is the same client with `--stations=100 --duration=120`.
 
+## Inspect stock
+
+`DATABASE_URL` is in asyncpg form, which `psql` will not parse — connect by database
+name instead, adding `-h /tmp` if your socket is elsewhere. Everything below reads
+`inventory_stock`, the same rows the completion path decrements, so it is the truth
+rather than the API's view of it.
+
+```bash
+psql -d checkout
+```
+
+Start with one row for the whole catalog. `units_sold` here should equal the
+`Units decremented` that `verify_invariant.py` reports; `below_threshold` counts
+against `LOW_STOCK_THRESHOLD` (default 50):
+
+```sql
+SELECT count(*)                                   AS skus,
+       sum(initial_stock)                         AS initial_units,
+       sum(current_stock)                         AS units_left,
+       sum(initial_stock - current_stock)         AS units_sold,
+       count(*) FILTER (WHERE current_stock = 0)  AS sold_out,
+       count(*) FILTER (WHERE current_stock < 50) AS below_threshold
+  FROM inventory_stock;
+```
+
+The most depleted SKUs. The client's Zipf sampler keys on catalog position, so a
+healthy run puts `SKU-000001` on top and decays steeply from there — if the ranking
+looks flat, the load did not run the way you think it did:
+
+```sql
+SELECT s.sku, c.name,
+       s.initial_stock - s.current_stock AS sold,
+       s.current_stock
+  FROM inventory_stock s JOIN catalog_item c USING (sku)
+ ORDER BY sold DESC, s.sku
+ LIMIT 20;
+```
+
+A single item — SKUs are zero-padded to six digits, so it is `SKU-000001`, not
+`SKU-1`:
+
+```sql
+SELECT s.sku, c.name, c.price_cents, s.current_stock, s.initial_stock
+  FROM inventory_stock s JOIN catalog_item c USING (sku)
+ WHERE s.sku = 'SKU-000001';
+```
+
+Alert history. One row per threshold crossing, written inside the completion
+transaction, so repeated rows for a SKU mean it crossed, was restocked, and crossed
+again — not that the alert fired twice for one descent:
+
+```sql
+SELECT sku, current_stock, threshold, triggered_at
+  FROM low_stock_alert
+ ORDER BY triggered_at DESC
+ LIMIT 20;
+```
+
+What is hot right now against what is left to sell — the popular-items snapshot
+joined to live stock. A high-rank SKU sitting at `0` is what turns later baskets
+into `409 INSUFFICIENT_STOCK`:
+
+```sql
+SELECT r.ord AS rank,
+       r.item->>'sku' AS sku,
+       (r.item->>'scanCount')::int AS scans,
+       s.current_stock
+  FROM popular_window_snapshot p,
+       LATERAL jsonb_array_elements(p.ranking) WITH ORDINALITY AS r(item, ord)
+  JOIN inventory_stock s ON s.sku = r.item->>'sku'
+ ORDER BY r.ord
+ LIMIT 20;
+```
+
+Transaction mix, for context on the numbers above. Only `COMPLETED` rows moved
+stock; a large `OPEN` count after a finished run means baskets were abandoned and
+the sweeper has not reached them yet:
+
+```sql
+SELECT status, count(*) FROM transaction GROUP BY status ORDER BY status;
+```
+
+To watch depletion while a run is in flight, follow any query with `\watch 2` to
+re-run it every two seconds. For scripts, use the non-interactive form:
+
+```bash
+psql -d checkout -tAc "SELECT sum(initial_stock - current_stock) FROM inventory_stock;"
+```
+
 ## How it works
 
 | Concern | Approach |
