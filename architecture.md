@@ -1,81 +1,55 @@
 ## Architecture Characteristics: Requirements
 
 ### Brainstorm
+Availability: The server and database should be available to customers at all operational hours (through the duration of the test). Target is 99.9% uptime during store hours. Errors or client failures at one checkout station (thread) should not interrupt the availability for other customers. Worth being honest that the current design does not meet this: one process against one database means either one failing takes the whole store down.
 
-**Availability**: Checkout is the revenue path — when it is down, the store stops taking money. Target 99.9% during store hours (about 45 seconds of downtime per twelve-hour day), with the qualification that a single checkout station failing must never affect the others. *Week 1 does not meet this.* The monolith is one process against one PostgreSQL instance, so either one is a single point of failure. Redundancy is what the later weeks should be judged on.
+Continuity: The system must be able to restore catalog stock, transaction metadata, and analytics data after a restart or failure so the next test run starts in a consistent state. Recovery should be a couple of minutes at most, since an hour of downtime means closing the lanes. We also accept losing under a second of already-committed transactions if the machine itself dies, because we run with synchronous commit turned off to keep throughput up. That is a deliberate trade, not an accident.
 
-**Continuity**: After a crash or restart, catalog, stock, transactions, and analytics must come back consistent with no manual repair. Realistic recovery objectives for a checkout system:
-- **RTO ≤ 2 minutes.** An hour of downtime means closing the lanes; the earlier "1 hour maximum" was not a serious target for this domain.
-- **RPO ≤ 1 second.** We run PostgreSQL with `synchronous_commit = off`, which trades an fsync per commit for throughput. Commits survive a process crash, but an OS or hardware failure can lose up to roughly 600 ms of them (PostgreSQL bounds the window at three times the 200 ms WAL writer delay). That is a deliberate, stated tradeoff — not an accident — and it fits inside a 1-second RPO with little room to spare.
+Performance: Latency should be invisible to the customer rather than just technically fast. Scanning is the operation that repeats, so it carries the tightest budget, while completion can be looser because it does several database round trips under locks where a scan does one. Under the default 10-station workload, no operation's p95 should exceed about 200% of its own median, and completion's p95 should stay within roughly 300-400% of scan's. Nothing should ever take long enough that a customer starts looking for staff. The only errors we accept are business rules firing correctly (like stock running out); faults should be 0% of requests.
 
-**Performance**: Latency has to be invisible to the customer, not merely "fast". Grounding the budget in the checkout experience rather than in what we happened to measure:
-- **Scan ≤ 50 ms p95.** Scanning is the repeated action — a 20-item basket pays this cost 20 times. Under ~100 ms reads as instantaneous, so 50 ms leaves room for the scanner hardware and network on top of the API.
-- **Complete ≤ 200 ms p95.** Paying happens once per basket, and a brief pause at the payment moment is socially normal.
-- **No request over 1 s, ever.** Past a second the customer looks for staff, which costs more than the transaction.
+Recoverability: If the app crashes mid-run, it must restore persisted inventory and analytics quickly without manual repair. Open transactions are intentionally not recovered, since they hold no stock (inventory only moves at completion) and get cancelled automatically after a timeout. In future versions, we might even want to be able to restore the current state of transactions so customers can get up and running mid interaction.
 
-Completion is allowed a larger budget than scanning on purpose: it is five database round trips under row locks (lock the transaction, collapse the basket, lock stock in SKU order, decrement conditionally, finalize) against one for a scan. Treating all three operations as one number would hide that.
+Reliability: Stock must never go negative, and for every SKU the total sold quantity plus final inventory must equal the initial inventory. Stock must also never be silently clamped at zero, which is the sneaky version of the same bug. Concurrent completions must preserve correctness. No customer should be able to check out (and pay for) a full basket that was only partially available. This is the one characteristic with 0% tolerance: a system that fails it is wrong no matter how fast it is.
 
-**Recoverability**: A mid-run crash must restore persisted inventory and analytics without manual intervention. Open transactions are deliberately *not* recovered: they hold no stock (inventory moves only at completion), and a sweeper cancels them after 5 minutes. Resuming a customer's in-progress basket across a restart is a future feature, not a week-1 requirement.
+Robustness: The API must handle invalid transaction IDs, missing SKUs, empty baskets, and malformed requests without corrupting state or crashing the service. If two transactions contend for the same SKU, the outcome should be deterministic rather than racy: one of them completes and the other gets a clear conflict error, with no deadlock and no overselling.
 
-**Reliability**: The hard invariant. For every SKU, `initial stock − final stock` must equal the number of units sold in completed transactions, stock must never go negative, and it must never be *silently clamped* to zero. Concurrent completions must preserve this. No customer may be charged for a basket that was only partially in stock — completion is all-or-nothing. This is the one requirement with no acceptable tolerance: a system that fails it is wrong no matter how fast it is.
+Scalability: The architecture must support increased concurrency from 10 stations to 100+ stations while maintaining correctness and avoiding disproportionate latency growth. Going to 100 stations is 10x the load, so p95 latency growing up to about 1000% is proportional and acceptable. Growth meaningfully beyond that means something is serializing. Throughput is allowed to drop under stress, but correctness is not allowed to change by any amount.
 
-**Robustness**: Invalid transaction IDs, unknown SKUs, empty baskets, and malformed bodies must produce the contract's documented error for each case without corrupting state or killing the service. When two transactions contend for the same SKU, the outcome must be deterministic rather than racy: one completes, the other receives a clear `409 INSUFFICIENT_STOCK`, and neither deadlocks nor oversells. Contention is resolved, not retried blindly.
+Configurability: The low-stock threshold, popular-item window size, slide interval, stock levels, worker count, and database configuration should be set through environment variables or config files without changing the core code.
 
-**Scalability**: Going from 10 to 100 stations is 10x the concurrency, so some degradation is expected and fine — what matters is that it stays *sub-linear* and that correctness is unaffected:
-- Per-operation p95 at 100 stations should grow no more than ~10x its 10-station value (like-for-like, p95 against p95 — the earlier "p95 within 2x of the baseline *average*" compared different statistics and was unachievable for any architecture at 10x load).
-- Zero dropped requests, zero timeouts, zero 5xx.
-- The reliability invariant must hold identically at 100 stations. Throughput may fall; correctness may not.
+Extensibility: New business rules, inventory attributes, customer interactions, additional analytics outputs, or other endpoints should be easy to add without rewriting the existing transaction or inventory core.
 
-**Configurability**: Low-stock threshold, popular-item window size, slide interval, stock levels, worker count, and database connection must all be settable via environment variables without touching code.
+Installability: The system should be straightforward to install and start locally, including the database and required runtime dependencies, so the app can be run consistently in development and testing. It should also be easy and consistent to refresh to a clean state without error, since every measured run depends on starting from identical state.
 
-**Extensibility**: New business rules, inventory attributes, analytics outputs, or endpoints should be addable without rewriting the transaction or inventory core.
+Maintainability: The code should isolate the most error-prone areas —> transaction lifecycle management, inventory decrement logic under concurrency, and sliding-window analytics—into separate modules (classes/modules at beginning) or services (later in the semester) with clear boundaries, so updates to one area do not require rewriting the rest of the backend. The implementation should make it easy to reason about how stock is decremented, how duplicate scans are prevented, and how popularity counts are recalculated.
 
-**Installability**: A clean machine should reach a running, seeded system in a small number of documented commands, and resetting to a known-good state must be a single reliable command — every measured run depends on starting from identical state.
+Upgradeability: The system should support schema changes and logic updates through migration or replacement steps without manual database repair. Right now the ORM models are the source of truth and the seed script rebuilds from scratch, which is fine for a benchmark that resets before every run but would not survive real data. Ideally, we will use ORM, LinkML, and Alembic to assist with this robust upgrade functionality.
 
-**Maintainability**: The error-prone areas — transaction lifecycle, inventory decrement under concurrency, and sliding-window analytics — belong in separate modules with clear boundaries (later in the semester, separate services), so a change in one does not force a rewrite elsewhere. A reader should be able to determine how stock is decremented, how double-completion is prevented, and how popularity is recomputed without reading the whole codebase.
+Security: Customers should never have access to eachother's purchase information -- enforced at the API level. Being honest about where we actually are: the contract defines no authentication, we serve plaintext HTTP on localhost, and nothing is encrypted at rest. That is acceptable for a benchmark on one machine, but transport security, authentication, and secret management are prerequisites for anything real, not enhancements.
 
-**Upgradeability**: Schema and logic changes should ship through migrations rather than manual database repair. Currently the ORM models are the schema source of truth and `seed.py` recreates from scratch, which is adequate for a benchmark that resets before every run but would not survive real data. Alembic is the intended next step.
+Supportability: The application should emit structured logs and error information for transaction failures, stock errors, and analytics issues to make debugging under load straightforward. A legitimate error (stock ran out) has to be distinguishable from a fault (the service broke), otherwise a report full of conflict errors is unreadable.
 
-**Security**: Customers must never see each other's purchase information, enforced at the API level. *Not implemented in week 1, and worth stating plainly rather than aspirationally:* the contract defines no authentication, the service runs plaintext HTTP on localhost, and nothing is encrypted at rest. For a benchmark harness on a single machine that is acceptable; for anything real, transport security, authentication, and secret management are prerequisites, not enhancements.
+Usability/achievability: The implementation should be easy to start locally, reset between test runs, and debug so it can be validated quickly without a long setup process.
 
-**Supportability**: Structured logs and stable machine-readable error codes for transaction failures, stock conflicts, and analytics problems, so failures under load can be diagnosed from the logs alone. Critically, a *legitimate* error (stock ran out) must be distinguishable from a *fault* (the service broke) — otherwise a report full of 409s is unreadable.
+### What We Actually Measured
+Worth recording so the targets above can be checked instead of just asserted. On the default 10-station run, p95 came in around 170-185% of the median for all three operations, so the tail is well inside the 200% budget, and completion sat around 300% of scan, which is the expected cost of doing several locked round trips instead of one. Fault rate was 0%.
 
-**Usability/achievability**: Easy to start, reset, and debug locally, so a change can be validated in minutes rather than as a long setup ritual.
+Under stress at 100 stations, scan and start p95 grew about 960-1030%, which is proportional to the 10x load increase and acceptable. Completion grew about 1770%, which is the one target we miss. The cause is lock contention: the client's item distribution puts a handful of hot SKUs in most baskets, so completions end up queueing behind the same row locks. That is the pressure point to watch when inventory becomes its own service later in the semester, because the contention does not disappear, it just moves onto the network.
 
-### Measured Baseline
-
-Recorded so the requirements above can be checked rather than asserted. Apple Silicon, 11 cores / 18 GB; PostgreSQL 17 over a Unix socket; 4 uvicorn workers. Full reports in `load-client/reports/`.
-
-Normal run — 10 stations / 60 s, stocked so nothing depletes, 0.00% errors:
-
-| Operation | p50 | p95 | p99 | Budget (p95) |
-| --- | --- | --- | --- | --- |
-| `START_TRANSACTION` | 0.75 ms | 1.26 ms | 1.94 ms | ≤ 50 ms |
-| `SCAN_ITEM` | 0.80 ms | 1.36 ms | 2.06 ms | ≤ 50 ms |
-| `COMPLETE_TRANSACTION` | 2.30 ms | 4.22 ms | 5.79 ms | ≤ 200 ms |
-
-788 transactions/s, 8 239 items/s.
-
-Stress — 100 stations / 120 s: `START` 6.14 / 12.95 / 20.74 ms, `SCAN` 6.24 / 12.98 / 20.55 ms, `COMPLETE` 9.89 / 74.60 / 189.53 ms; 9 296 items/s; no timeouts, no 5xx; invariant verified on 225 431 units.
-
-Degradation at 10x concurrency (p95 against p95): `SCAN` 9.6x, `START` 10.3x, `COMPLETE` **17.7x**. Scanning scales sub-linearly as required and starting sits essentially on the linear boundary; **completion is the clear miss** at nearly twice linear. The cause is lock contention on the hot SKUs — the Zipf workload drives a handful of SKUs into most baskets, so completions serialize behind the same row locks. That is precisely the pressure point the later distributed weeks should be compared on, and it is where this architecture would need work before 100 stations became routine rather than a stress case.
-
-Performance carries 37–47x headroom against the customer-facing budgets, so latency is not the binding constraint for this architecture. That is a finding, not a reason to loosen the budgets: the budgets describe what the business needs, and the headroom is what the monolith buys us before network hops start consuming it.
+Correctness held in every run, including stress, with zero drift between units sold and units decremented.
 
 ### Group and DeDuplicate
-
-#### Category Groupings
-
+#### Category Groupings: 
 Operational:
 - Availability
-- Continuity
+- Continuity 
 - Performance
 - Recoverability
 - Reliability
 - Robustness
 - Scalability
 
-Structural:
+Structural: 
 - Configurability
 - Extensibility
 - Installability
@@ -85,25 +59,20 @@ Structural:
 Cross-Cutting:
 - Security
 - Supportability
-- Usability
+- Useability
 
-#### Implementation Groupings (what will benefit from each other)
-
-- **Continuity + Recoverability + Upgradeability** — all satisfied by the same decision: durable state in PostgreSQL with a deterministic rebuild path. One mechanism, three characteristics.
-- **Availability + Scalability + Performance** — all served by stateless workers behind shared state. Because no worker holds session state, adding workers is the lever for all three at once (and is why the analytics window had to live in the database rather than in process memory).
-- **Reliability + Robustness + Supportability** — the same design produces all three: doing the stock decrement in one transaction makes it correct, makes contention resolve deterministically, and makes the resulting `409` a meaningful signal instead of noise.
-- **Configurability + Installability + Usability** — one reset command plus environment-variable configuration is what makes runs reproducible and comparable week to week.
+#### Implementation Groupings (what will benefit from eachother)
+- Continuity, Recoverability, Upgradeability: all three come out of the same decision to keep durable state in the database with a repeatable rebuild path
+- Availability, Scalability, Performance: all served by keeping workers stateless, which is also why the analytics window had to live in the database instead of in process memory
+- Reliability, Robustness, Supportability: doing the stock decrement in one transaction makes it correct, makes contention resolve predictably, and makes the resulting error a useful signal instead of noise
 
 ### Trade Offs
-
-- **Performance vs. reliability.** Every lock and conditional check costs latency. The mock server is the extreme case: it decrements with `Math.max(0, current - 1)` and no database, reaching 2 624 tx/s — but it silently loses units and fails the graded invariant the moment anything depletes. Our correct implementation runs 788 tx/s on the same hardware. **Correctness costs roughly 3.3x throughput here, and it is worth it** — a checkout system that charges for unavailable stock is not a faster system, it is a broken one.
-- **Scalability vs. simplicity.** More workers and richer concurrency control raise throughput but add operational and debugging burden. Async is mandatory for I/O-bound request handling, yet async control flow is harder to reason about than straight-line procedural code, and the failure modes (a blocked event loop, a connection pool bound to the wrong loop) are less obvious.
-- **Latency vs. durability.** `synchronous_commit = off` removes an fsync from the completion path at the cost of a sub-second RPO on hardware failure. Fully synchronous commits would make the benchmark measure disk fsync latency rather than the architecture.
-- **Maintainability vs. optimization.** Hand-written SQL on the two hot paths is faster and expresses the locking more clearly than ORM unit-of-work, but it is a second way of talking to the database that has to be kept consistent with the models. Cold paths stay on the ORM.
-- **Maintainability vs. supportability.** Delegating to well-built libraries beats writing our own, but each dependency is a maintenance and upgrade tax.
+- Performance vs. reliability: Every database lock and check ensures reliability, but slows the system down. The most extreme version of this is visible in the mockserver that just decrements without any db backing. Very fast, but not reliable! It runs a bit over 3x our throughput and silently loses inventory the moment anything sells out. Paying that 3x for correctness is obviously the right call, since a checkout that charges for stock it does not have is not a faster system, it is a broken one.
+- Scalability vs. simplicity: More workers or more complex concurrency controls can improve throughput, but they add operational and debugging complexity. Similarly, asynchronous workers are mandatory, but async is harder to fully grok in code than standard procedural operations.
+- Latency vs. durability: Turning off synchronous commit takes a disk flush out of the checkout path, at the cost of possibly losing the last fraction of a second of commits on a hardware failure. Leaving it on would mostly measure disk speed instead of the architecture.
+- Maintainability vs. optimization vs. supportability: Delegating out complex functionality to well designed packages by people who have more research experience on the function will increase speed over writing things ourselves, but maintaining packages can be a tax on code and make it harder to ship a package out.
 
 ### Top Ranked 3
-
-1. **Reliability/safety.** Inventory correctness, transaction consistency, and data security are the core business requirements. Customers paying for goods they do not receive, erroneous transactions, or leaked data are existential, not inconvenient. This is also the only characteristic on this list with zero tolerance — and, per the trade-off above, the one we deliberately spent throughput to guarantee.
-2. **Performance.** The service must stay responsive across both load profiles; customers tolerate a short wait and abandon a long one. Measurement shows this is currently satisfied with wide margin, which means it is not the constraint *this* week — but it is the characteristic most likely to erode first as later weeks add network hops between services.
-3. **Scalability.** Growing station count should not require a redesign. Small-scale excellent service is still a viable business, so this ranks below the first two — but the 17.7x completion degradation already measured at 100 stations is the concrete warning sign to carry into the distributed weeks.
+1. Reliability/safety: Inventory correctness, transaction consistency, and data security are the most important business requirements. If customers pay for things they don't get, have their data stolen, or have erroneous transactions, this could lead to shutting down the entire operation (devastating). It is also the only one of these with no acceptable margin, and the one we knowingly spent throughput to guarantee.
+2. Performance: The service must handle concurrent station traffic and keep latency acceptable under the client's load profiles. This is purely a customer satisfaction concern. Customers will wait for a period of time, but too much of this will lead to dissatisfaction. Right now we clear this target with a lot of room, so it is not the binding constraint this week, but it is the first thing that will erode once services start talking over a network.
+3. Scalability: The design should handle higher station counts without major redesign or large latency increases. We want to be able to grow the business, but small-scale, excellent service can still make money. The completion slowdown we already see at 100 stations is the concrete warning sign to carry forward.
