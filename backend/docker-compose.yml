@@ -1,0 +1,34 @@
+# Fallback only. Native Homebrew PostgreSQL is preferred (research R3) — Docker
+# Desktop on macOS runs the database inside a VM, which adds latency and noise.
+# Record which mode produced a report; mixing them makes runs incomparable.
+services:
+  postgres:
+    image: postgres:17
+    container_name: checkout-postgres
+    environment:
+      POSTGRES_DB: checkout
+      POSTGRES_USER: checkout
+      POSTGRES_PASSWORD: checkout
+    ports:
+      - "5432:5432"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=4GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - max_connections=200
+      - -c
+      - synchronous_commit=off
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_wal_size=8GB
+    volumes:
+      - checkout-pgdata:/var/lib/postgresql/data
+
+volumes:
+  checkout-pgdata:

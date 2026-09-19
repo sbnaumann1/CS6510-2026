@@ -37,7 +37,7 @@ Store managers need to monitor inventory levels and receive alerts when stock fa
 
 **Acceptance Scenarios**:
 
-1. **Given** an item with stock=51 and low-stock threshold=50, **When** one unit is purchased, **Then** a low-stock alert is generated for that item
+1. **Given** an item with stock=50 and low-stock threshold=50, **When** one unit is purchased, **Then** stock falls to 49 — below the threshold — and a low-stock alert is generated for that item
 2. **Given** a query for low-stock items with threshold=100, **When** the endpoint is called, **Then** the system returns all items with current stock < 100 in timestamp order
 3. **Given** any completed transaction, **When** stock would go negative, **Then** the system prevents the transaction and returns error "insufficient stock"
 
@@ -95,14 +95,15 @@ Analytics system tracks the most frequently scanned items in a sliding window (e
 
 ### Measurable Outcomes
 
-- **SC-001**: API endpoints respond with p50 latency < 0.5ms, p95 < 1.0ms, p99 < 2.0ms (measured from 10+ concurrent stations over 60+ seconds)
-- **SC-002**: System processes 2,000+ transactions per second with 10 stations; scales to handle 100+ stations without transaction failure
-- **SC-003**: Stock accuracy maintained: final inventory count + sum of all decrements = initial count, even under concurrent load from 100 stations
-- **SC-004**: Zero data loss: all completed transactions are recorded; no duplicate inventory decrements
-- **SC-005**: Low-stock alerts generated within 100ms of inventory drop below threshold
+- **SC-001**: Per-operation p50/p95/p99 latencies are recorded from a default-parameter run (10 stations, 60 seconds) on the grading host and reported for comparison against the other architecture styles in the series
+- **SC-002**: Throughput (transactions/sec and items/sec) is recorded from the same run and reported for the same comparison; the system sustains 10 stations and scales to 100 stations with no transaction loss and no correctness failure
+- **SC-003**: Stock accuracy maintained: for every item, initial stock minus final stock equals the number of completed-transaction line items for that item; stock never goes negative and is never silently clamped — verified after every run, normal and stress
+- **SC-004**: Zero data loss: all completed transactions are recorded; no duplicate inventory decrements; all data survives a server restart
+- **SC-005**: Low-stock alerts reflect current stock at query time for every item below the configured threshold, with no missed, stale, or duplicated items
 - **SC-006**: Popular items rankings reflect true scan counts within 500-scan update interval (sliding window)
-- **SC-007**: Load test with default parameters completes all transactions with 0% error rate
-- **SC-008**: Stress test (100 stations, 120 seconds) completes with 0% transaction failures and correct final stock counts
+- **SC-007**: Load test with default parameters completes with no transport errors, timeouts, or server errors; the only failed requests are contract-defined 4xx responses produced by correct business rules (for example, refusing to oversell a depleted item)
+- **SC-008**: Stress test (100 stations, 120 seconds) completes under the same conditions as SC-007 with the SC-003 invariant still holding; degraded tail latency is acceptable, incorrect stock is not
+- **SC-009**: Every response matches the frozen API contract exactly — field names, shapes, and status codes — so the unmodified load client runs end to end
 
 ## Assumptions
 
