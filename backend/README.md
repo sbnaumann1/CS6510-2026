@@ -191,17 +191,20 @@ without clamping stock.
 ## Layout
 
 ```
-app/
+app/                   four layers; see specs/002-layered-architecture/contracts/layer-boundaries.md
+  api/               API layer: routes + request parsing (_request.py); no SQL
+  transactions/      Transactions layer: lifecycle + completion invariant (service.py),
+                     low-stock alert emission (alerts.py), abandoned-tx sweeper (sweeper.py)
+  analytics/         Analytics layer: popular-items window (popular_items.py),
+                     low-stock report (low_stock.py), recompute trigger (scheduler.py)
+  db/                Database access layer: engine/session/advisory lock (__init__.py),
+                     all SQL in transactions_repo.py and analytics_repo.py
   main.py            app factory, lifespan, sweeper loop
   config.py          env-backed settings
-  db.py              async engine, session factory, advisory lock
   models.py          ORM models = schema source of truth
   money.py           integer-cent helpers + the catalog price formula
-  catalog_cache.py   in-memory catalog + pre-rendered /items body
+  catalog_cache.py   in-memory catalog + pre-rendered /items body (shared)
   errors.py          ApiError codes and handlers (400/404/409/500)
-  background.py      window recompute trigger, abandoned-tx sweeper
-  api/               catalog, transactions, inventory, analytics routes
-  services/          transactions (scan CTE, completion), inventory, analytics
 scripts/
   seed.py            deterministic reset
   verify_invariant.py  the graded correctness check

@@ -78,7 +78,7 @@ async def test_window_slides_past_older_scans(client, session):
     Driven directly against the analytics service so the test stays fast; the
     HTTP path over 1000+ scans is covered by the load run.
     """
-    from app.services import analytics
+    from app.analytics import popular_items as analytics
 
     # 1200 line items: the first 300 are SKU-000001, the rest SKU-000002.
     tx_id = await session.scalar(
@@ -106,7 +106,7 @@ async def test_window_slides_past_older_scans(client, session):
 
 
 async def test_recompute_is_idempotent(client, session):
-    from app.services import analytics
+    from app.analytics import popular_items as analytics
 
     await _scan_many(client, {"SKU-000001": 10})
     await analytics.recompute(session)
@@ -119,7 +119,7 @@ async def test_recompute_is_idempotent(client, session):
 
 
 async def test_snapshot_is_a_single_row(client, session):
-    from app.services import analytics
+    from app.analytics import popular_items as analytics
 
     await _scan_many(client, {"SKU-000001": 5})
     for _ in range(3):

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api._request import positive_int_param
 from app.config import settings
 from app.db import get_session
-from app.services import inventory as svc
+from app.analytics import low_stock as svc
 
 router = APIRouter(tags=["inventory"])
 
@@ -19,4 +19,4 @@ async def low_stock(
     request: Request, session: AsyncSession = Depends(get_session)
 ) -> Response:
     threshold = positive_int_param(request, "threshold", settings.low_stock_threshold)
-    return ORJSONResponse(content=await svc.low_stock(session, threshold))
+    return ORJSONResponse(content=await svc.read(session, threshold))

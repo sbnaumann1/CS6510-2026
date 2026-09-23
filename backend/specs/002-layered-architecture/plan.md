@@ -50,6 +50,23 @@ the new layers is expected to be sub-microsecond next to a network round trip an
 to move these numbers meaningfully; Phase 3 of implementation should re-run the load client to
 confirm rather than assume this.
 
+**Measured (implementation, 2026-09-23)** — A/B on the same host, same session, same seed
+(`STOCK_PER_ITEM=200000`, quickstart V7 of 001), 4 workers, 10 stations / 60 s, 0 % errors both
+runs, reports in [`reports/`](./reports/):
+
+| Operation | Pre-refactor p50 / p95 / p99 | Layered p50 / p95 / p99 |
+| --- | --- | --- |
+| `START_TRANSACTION` | 0.85 / 1.31 / 1.82 ms | 0.74 / 1.51 / 1.84 ms |
+| `SCAN_ITEM` | 0.91 / 1.39 / 1.95 ms | 0.79 / 1.60 / 1.95 ms |
+| `COMPLETE_TRANSACTION` | 2.53 / 4.51 / 6.02 ms | 2.50 / 4.67 / 6.21 ms |
+| Throughput | 741 tx/s | 733 tx/s |
+
+The differences go both ways (layered p50 is lower, p95 is slightly higher, and throughput is
+within about 1 %), which reads as run-to-run noise. SC-004 is met. Both runs are a little slower
+than 001's recorded 788 tx/s. Since that holds for the unchanged code too, the cause is host
+conditions on the day, not the refactor. `verify_invariant.py` passed on the layered run
+(461 425 line items, 0 negative, 0 mismatched).
+
 **Constraints**: The frozen OpenAPI contract (`backend/spec.yaml` / `contracts/openapi.yaml` from
 001) does not change — every request/response shape, status code, and error body stays exactly as
 graded. No behavior visible outside `backend/app/` may change.

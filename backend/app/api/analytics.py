@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._request import positive_int_param
 from app.db import get_session
-from app.services import analytics as svc
+from app.analytics import popular_items as svc
 
 router = APIRouter(tags=["analytics"])
 

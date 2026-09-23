@@ -16,8 +16,9 @@ cd backend
 uv run pytest
 ```
 
-Expected: every test that passed before this refactor still passes — no test file edited (spec
-FR-009, SC-001). This is the primary oracle; everything below is a supplementary check specific
+Expected: every test that passed before this refactor still passes (101 at the time of the
+refactor) with no assertion changed. The only test edit is the import path in
+`tests/integration/test_popular_items.py` (spec FR-009, SC-001; research R5 correction). This is the primary oracle; everything below is a supplementary check specific
 to *this* feature (the previous suite already proves *checkout behavior* didn't change).
 
 ## 2. Structural checks: the layer-boundary contract holds

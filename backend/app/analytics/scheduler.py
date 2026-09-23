@@ -1,4 +1,4 @@
-"""Out-of-band work: popular-window recompute."""
+"""Popular-window recompute scheduling, run off the request path."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import logging
 
 from app.config import settings
 from app.db import POPULAR_RECOMPUTE_LOCK, SessionLocal, advisory_lock, engine
-from app.services import analytics
+from app.analytics import popular_items
 
 log = logging.getLogger("checkout")
 
@@ -31,6 +31,6 @@ async def recompute_window() -> None:
                 if not acquired:
                     return
                 async with SessionLocal() as session:
-                    await analytics.recompute(session)
+                    await popular_items.recompute(session)
     except Exception:  # never let background work surface as a request error
         log.exception("popular-window recompute failed")

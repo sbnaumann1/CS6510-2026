@@ -10,7 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import ORJSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import background
+from app.analytics import scheduler
 from app.api._request import _json_body, _required_str
 from app.db import get_session
 from app.transactions import service as svc
@@ -41,8 +41,8 @@ async def scan_item(
     tx_id = svc.parse_tx_id(transaction_id)
 
     result, scan_seq = await svc.scan_item(session, tx_id, sku)
-    if background.should_recompute(scan_seq):
-        tasks.add_task(background.recompute_window)
+    if scheduler.should_recompute(scan_seq):
+        tasks.add_task(scheduler.recompute_window)
     return ORJSONResponse(content=result)
 
 

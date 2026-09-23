@@ -61,7 +61,7 @@ Single project rooted at `backend/` (unchanged from 001). All paths below are re
 
 ### Implementation for User Story 1
 
-- [X] T009 [P] [US1] Create `app/db/transactions_repo.py` with `insert_transaction(session, station_id)`, `scan_item(session, tx_id, sku, price_cents)`, `get_status(session, tx_id)`, `lock_transaction(session, tx_id)`, `get_basket(session, tx_id)`, `lock_stock(session, skus)`, `decrement_stock(session, basket, tx_id)`, `complete_transaction(session, tx_id, total_cents)`, `get_transaction(session, tx_id)` — moving the SQL from `app/services/transactions.py`'s `_INSERT_TX`, `_SCAN`, `_TX_STATUS`, `_LOCK_TX`, `_BASKET`, `_LOCK_STOCK`, the inline `UPDATE ... FROM (VALUES ...)` decrement, `_COMPLETE_TX`, and `_GET_TX` respectively (signatures and return shapes per data-model.md's `transactions_repo.py` table); no function calls `commit`/`rollback`/`begin`
+- [X] T009 [P] [US1] Create `app/db/transactions_repo.py` with `insert_transaction(session, station_id)`, `scan_item(session, tx_id, sku, price_cents)`, `get_status(session, tx_id)`, `lock_transaction(session, tx_id)`, `get_basket(session, tx_id)`, `lock_stock(session, skus)`, `decrement_stock(session, basket)`, `complete_transaction(session, tx_id, total_cents)`, `get_transaction(session, tx_id)` — moving the SQL from `app/services/transactions.py`'s `_INSERT_TX`, `_SCAN`, `_TX_STATUS`, `_LOCK_TX`, `_BASKET`, `_LOCK_STOCK`, the inline `UPDATE ... FROM (VALUES ...)` decrement, `_COMPLETE_TX`, and `_GET_TX` respectively (signatures and return shapes per data-model.md's `transactions_repo.py` table); no function calls `commit`/`rollback`/`begin`
 - [X] T010 [P] [US1] Add `insert_alerts(session, crossings)` to `app/db/transactions_repo.py`, moving the `_INSERT_ALERT` statement from `app/services/inventory.py`
 - [X] T011 [P] [US1] Add `sweep_abandoned(session, minutes)` to `app/db/transactions_repo.py`, moving the inline `UPDATE transaction SET status = 'CANCELLED' WHERE status = 'OPEN' AND started_at < now() - make_interval(mins => :mins)` statement out of `app/background.py`'s `sweep_abandoned` function, returning the rowcount
 - [X] T012 [P] [US1] Create `app/db/analytics_repo.py` with `max_scan_seq(session)`, `window_counts(session, start, end, depth)`, `upsert_snapshot(session, window_size, slide_interval, start, end, ranking_json)`, `read_snapshot(session)` — moving `_MAX_SEQ`, `_WINDOW_COUNTS`, `_UPSERT`, `_READ` from `app/services/analytics.py` (signatures per data-model.md's `analytics_repo.py` table)
@@ -104,14 +104,14 @@ Single project rooted at `backend/` (unchanged from 001). All paths below are re
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] Create `app/analytics/popular_items.py`: move `RANKING_DEPTH`, `_bounds`, `_counts`, `_render`, `recompute`, `read` from `app/services/analytics.py` verbatim (already SQL-free after US1)
-- [ ] T027 [US3] Create `app/analytics/low_stock.py`: move the `low_stock` read function from `app/services/inventory.py` verbatim (already calling `analytics_repo.low_stock_report`/`.now` after US1)
-- [ ] T028 [US3] Create `app/analytics/scheduler.py`: move `should_recompute` and `recompute_window` from `app/background.py` verbatim
-- [ ] T029 [US3] Update `app/api/analytics.py` to import from `app.analytics.popular_items` instead of `app.services.analytics`
-- [ ] T030 [US3] Update `app/api/inventory.py` to import from `app.analytics.low_stock` instead of `app.services.inventory`
-- [ ] T031 [US3] Update `app/api/transactions.py`'s `scan_item` endpoint and `app/main.py`'s `lifespan` to call `app.analytics.scheduler.should_recompute` / `.recompute_window` directly instead of `app.background.should_recompute` / `.recompute_window`
-- [ ] T032 [US3] Delete `app/services/analytics.py`, `app/services/inventory.py`, `app/services/__init__.py`, the now-empty `app/services/` directory, and `app/background.py`
-- [ ] T033 [US3] Run `test_analytics`, `test_popular_items`, the read half of `test_low_stock`, and the full suite; run `grep -rn "text(" app/analytics` and `grep -rn "from app.transactions\|import app.transactions" app/analytics` (both must print nothing); confirm `test ! -d app/services && test ! -f app/background.py`
+- [X] T026 [US3] Create `app/analytics/popular_items.py`: move `RANKING_DEPTH`, `_bounds`, `_counts`, `_render`, `recompute`, `read` from `app/services/analytics.py` verbatim (already SQL-free after US1)
+- [X] T027 [US3] Create `app/analytics/low_stock.py`: move the `low_stock` read function from `app/services/inventory.py` verbatim (already calling `analytics_repo.low_stock_report`/`.now` after US1)
+- [X] T028 [US3] Create `app/analytics/scheduler.py`: move `should_recompute` and `recompute_window` from `app/background.py` verbatim
+- [X] T029 [US3] Update `app/api/analytics.py` to import from `app.analytics.popular_items` instead of `app.services.analytics`
+- [X] T030 [US3] Update `app/api/inventory.py` to import from `app.analytics.low_stock` instead of `app.services.inventory`
+- [X] T031 [US3] Update `app/api/transactions.py`'s `scan_item` endpoint and `app/main.py`'s `lifespan` to call `app.analytics.scheduler.should_recompute` / `.recompute_window` directly instead of `app.background.should_recompute` / `.recompute_window`
+- [X] T032 [US3] Delete `app/services/analytics.py`, `app/services/inventory.py`, `app/services/__init__.py`, the now-empty `app/services/` directory, and `app/background.py`
+- [X] T033 [US3] Run `test_analytics`, `test_popular_items`, the read half of `test_low_stock`, and the full suite; run `grep -rn "text(" app/analytics` and `grep -rn "from app.transactions\|import app.transactions" app/analytics` (both must print nothing); confirm `test ! -d app/services && test ! -f app/background.py`
 
 **Checkpoint**: All three user stories complete. Every layer-boundary check in contracts/layer-boundaries.md can now be run against the real, final `app/` tree.
 
@@ -121,10 +121,10 @@ Single project rooted at `backend/` (unchanged from 001). All paths below are re
 
 **Purpose**: Whole-tree verification that spans all three stories
 
-- [ ] T034 [P] Run all three grep checks from contracts/layer-boundaries.md against the final tree exactly as written there (`app/transactions app/analytics app/api`, both cross-import directions, and `app/db` for stray `commit()`/`rollback()`/`begin(` calls) — all three must print nothing
-- [ ] T035 [P] Grep the whole `app/` tree for lingering `app.services` or `app.background` import references (e.g. stale comments in `app/main.py`, `app/errors.py`) and fix any found
-- [ ] T036 Re-run the load client at 10 stations / 60 s (`load-client/`) and compare `START_TRANSACTION`/`SCAN_ITEM`/`COMPLETE_TRANSACTION` p50/p95/p99 against the baseline recorded in `specs/001-checkout-backend/plan.md`, confirming SC-004 (no meaningful regression)
-- [ ] T037 Run quickstart.md's full validation sequence (steps 1–5) end-to-end and record the result
+- [X] T034 [P] Run all three grep checks from contracts/layer-boundaries.md against the final tree exactly as written there (`app/transactions app/analytics app/api`, both cross-import directions, and `app/db` for stray `commit()`/`rollback()`/`begin(` calls) — all three must print nothing
+- [X] T035 [P] Grep the whole `app/` tree for lingering `app.services` or `app.background` import references (e.g. stale comments in `app/main.py`, `app/errors.py`) and fix any found
+- [X] T036 Re-run the load client at 10 stations / 60 s (`load-client/`) and compare `START_TRANSACTION`/`SCAN_ITEM`/`COMPLETE_TRANSACTION` p50/p95/p99 against the baseline recorded in `specs/001-checkout-backend/plan.md`, confirming SC-004 (no meaningful regression)
+- [X] T037 Run quickstart.md's full validation sequence (steps 1–5) end-to-end and record the result
 
 ---
 

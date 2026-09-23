@@ -101,7 +101,16 @@ module path.
 database tables, never through an internal Python import of business-layer code. This is exactly
 what spec FR-009 requires and what SC-001 measures.
 
-**Alternatives considered**: N/A — this is a factual check, not a design choice.
+**Correction (found during implementation)**: The check above missed one file.
+`tests/integration/test_popular_items.py` imports `app.services.analytics` directly in three
+tests, calling `recompute`/`read` so they can exercise a 1000-scan window without 1000 HTTP
+requests. Moving that module to `app/analytics/popular_items.py` breaks those imports. They were
+updated to `from app.analytics import popular_items as analytics`, and no assertion changed.
+spec FR-009/SC-001 were amended to allow import-path-only test edits.
+
+**Alternatives considered**: Keep `app/services/analytics.py` as a re-export shim so the test
+file is untouched. Rejected because it would contradict plan.md's Structure Decision (no shims)
+and quickstart step 3 (`app/services/` is gone), just to avoid a three-line import change.
 
 ## R6. How is "no cross-layer internal import" (spec FR-006) enforced?
 

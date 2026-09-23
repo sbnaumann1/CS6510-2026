@@ -1,4 +1,4 @@
-"""Inventory service: the low-stock view."""
+"""Low-stock report — the read side of low-stock tracking."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import analytics_repo
 
 
-async def low_stock(session: AsyncSession, threshold: int) -> dict[str, Any]:
+async def read(session: AsyncSession, threshold: int) -> dict[str, Any]:
     rows = await analytics_repo.low_stock_report(session, threshold)
     generated_at = await analytics_repo.now(session)
     return {

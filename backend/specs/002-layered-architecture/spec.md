@@ -83,7 +83,7 @@ A maintainer changing how the popular-items window is computed, recomputed, or r
 - **FR-006**: The transactions layer and the analytics layer MUST NOT import each other's internal modules directly; any interaction between them MUST go through the database-access layer or explicitly shared infrastructure.
 - **FR-007**: The refactor MUST NOT change any API request/response shape, error code, or HTTP status code documented in the existing contracts.
 - **FR-008**: The refactor MUST NOT change the database schema.
-- **FR-009**: The existing contract and integration test suites MUST pass unchanged (no test file edits) after the refactor is complete.
+- **FR-009**: The existing contract and integration test suites MUST pass after the refactor with no change to any test assertion. The only permitted test edit is updating the import path of an internal module a test calls directly (three `from app.services import analytics` lines in `tests/integration/test_popular_items.py`, which drive the window recompute without 1000+ HTTP scans).
 
 ### Key Entities
 
@@ -97,7 +97,7 @@ A maintainer changing how the popular-items window is computed, recomputed, or r
 
 ### Measurable Outcomes
 
-- **SC-001**: 100% of the existing contract and integration tests pass without any modification to the test files after the refactor.
+- **SC-001**: 100% of the existing contract and integration tests pass after the refactor with no assertion changes (import-path updates only, per FR-009).
 - **SC-002**: Zero raw SQL statements exist outside the database-access layer's modules, verified by inspection.
 - **SC-003**: A maintainer can identify every module responsible for a given business rule (e.g., "how is low stock detected," "how is the popular-items window recomputed") within a single layer's modules, without reading any SQL text.
 - **SC-004**: Observed request latency for the hot paths (scan, complete) after the refactor stays within the ranges already measured and documented for the current monolith, confirming the added layering introduces no meaningful overhead.
