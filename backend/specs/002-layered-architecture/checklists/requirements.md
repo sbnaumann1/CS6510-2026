@@ -32,5 +32,5 @@
 ## Notes
 
 - This feature is a structural refactor rather than a user-facing feature, so "users" in the User Scenarios section are the maintaining engineers rather than end customers — this is noted explicitly in the spec's scenario preamble rather than left implicit.
-- Two design decisions that could otherwise have been [NEEDS CLARIFICATION] markers (where `inventory.py`'s responsibilities land, and how the catalog cache is classified) were resolved during specification discussion and recorded under Assumptions instead, since reasonable defaults existed and neither materially changes feature scope.
+- Two design decisions that could otherwise have been [NEEDS CLARIFICATION] markers (where `inventory.py`'s responsibilities land, and how the catalog cache is classified) were resolved during specification discussion and recorded under Assumptions instead, since reasonable defaults existed and neither materially changes feature scope. `inventory.py`'s two responsibilities split across layers: alert-crossing emission (write) to Transactions, low-stock read to Analytics.
 - All items pass; no spec updates required before `/speckit-clarify` or `/speckit-plan`.

@@ -35,11 +35,11 @@ A maintainer working on business logic (transaction rules or analytics rules) sh
 
 ### User Story 2 - Consolidate transaction lifecycle and stock rules into a Transactions layer (Priority: P2)
 
-A maintainer changing checkout behavior (starting a transaction, scanning an item, completing a basket, reading transaction state, decrementing stock, emitting low-stock alerts, or sweeping abandoned transactions) should find all of that logic in one cohesive layer, calling down into the database-access layer from Story 1 rather than embedding SQL itself.
+A maintainer changing checkout behavior (starting a transaction, scanning an item, completing a basket, reading transaction state, decrementing stock, emitting low-stock alerts on crossing, or sweeping abandoned transactions) should find all of that logic in one cohesive layer, calling down into the database-access layer from Story 1 rather than embedding SQL itself. Reporting on current low-stock state (the read side) is not part of this layer — see Story 3.
 
 **Why this priority**: This is the layer with the most business-critical invariants (deadlock-free lock ordering, atomic stock decrement, exactly-once alert emission) — consolidating it right after the data-access extraction, while that extraction is fresh, minimizes the risk of silently changing these invariants.
 
-**Independent Test**: Can be fully tested by running the transaction-related contract tests (`test_transactions_*`) and the concurrency-sensitive integration tests (`test_checkout_flow`, `test_concurrent_completion`, `test_low_stock`) unchanged, and confirming the transactions layer's modules contain no references to the analytics layer's internals.
+**Independent Test**: Can be fully tested by running the transaction-related contract tests (`test_transactions_*`) and the concurrency-sensitive integration tests (`test_checkout_flow`, `test_concurrent_completion`, and the completion half of `test_low_stock`) unchanged, and confirming the transactions layer's modules contain no references to the analytics layer's internals.
 
 **Acceptance Scenarios**:
 
@@ -49,18 +49,19 @@ A maintainer changing checkout behavior (starting a transaction, scanning an ite
 
 ---
 
-### User Story 3 - Consolidate popular-items analytics into an Analytics layer (Priority: P3)
+### User Story 3 - Consolidate popular-items and low-stock reporting into an Analytics layer (Priority: P3)
 
-A maintainer changing how the popular-items window is computed, recomputed, or read should find all of that logic in one cohesive layer, independent of transaction-completion internals, calling down into the database-access layer from Story 1.
+A maintainer changing how the popular-items window is computed, recomputed, or read — or how current low-stock state is reported — should find all of that reporting logic in one cohesive layer, independent of transaction-completion internals, calling down into the database-access layer from Story 1. This layer owns the read side of low-stock reporting (`GET /inventory/low-stock`); it does not own alert emission, which stays a write-time side effect of completing a transaction (Story 2).
 
-**Why this priority**: Lower risk and lower coupling than Story 2 — analytics only reads the scan sequence produced by transactions, so it can be separated last without blocking the higher-risk work above.
+**Why this priority**: Lower risk and lower coupling than Story 2 — both the popular-items window and the low-stock report only read state that transactions produce as a side effect, so this reporting-focused layer can be separated last without blocking the higher-risk work above.
 
-**Independent Test**: Can be fully tested by running the analytics contract and integration tests (`test_analytics`, `test_popular_items`) unchanged, and confirming the recompute-scheduling logic (currently split across `background.py`) is reachable from a single analytics-layer entry point rather than being interleaved with the transaction-sweep logic.
+**Independent Test**: Can be fully tested by running the analytics contract and integration tests (`test_analytics`, `test_popular_items`, and the read half of `test_low_stock`) unchanged, and confirming the recompute-scheduling logic (currently split across `background.py`) is reachable from a single analytics-layer entry point rather than being interleaved with the transaction-sweep logic.
 
 **Acceptance Scenarios**:
 
 1. **Given** enough scans to cross a slide-interval boundary, **When** the next scan happens, **Then** the popular-items window recomputes exactly as it does today and is served identically on the next read.
 2. **Given** no snapshot yet computed, **When** `GET /analytics/popular-items` is called, **Then** it falls back to computing the window on demand exactly as it does today.
+3. **Given** stock currently below the requested threshold, **When** `GET /inventory/low-stock` is called, **Then** it returns the same alert listing, in the same order, as it does today — reading live stock and the most recent alert per SKU without needing any lock owned by the transactions layer.
 
 ---
 
@@ -76,8 +77,8 @@ A maintainer changing how the popular-items window is computed, recomputed, or r
 
 - **FR-001**: The API layer MUST contain no raw SQL and MUST NOT begin, commit, or roll back a database transaction; it MUST delegate all business logic to the transactions layer or the analytics layer.
 - **FR-002**: The database-access layer MUST expose only functions that accept a session and parameters and return rows or scalars; it MUST NOT contain business validation, error-raising, or transaction-boundary control.
-- **FR-003**: The transactions layer MUST own all business logic for starting, scanning, completing, and reading transactions, including deterministic stock-lock ordering, the atomic conditional stock decrement, low-stock alert emission on threshold crossing, and the abandoned-transaction sweep.
-- **FR-004**: The analytics layer MUST own all business logic for the popular-items window, including recompute scheduling/execution and the read path, independent of the transactions layer's internal modules.
+- **FR-003**: The transactions layer MUST own all business logic for starting, scanning, completing, and reading transactions, including deterministic stock-lock ordering, the atomic conditional stock decrement, low-stock alert emission (write side) on threshold crossing, and the abandoned-transaction sweep.
+- **FR-004**: The analytics layer MUST own all business logic for the popular-items window (recompute scheduling/execution and the read path) and for the low-stock report read path (`GET /inventory/low-stock`), independent of the transactions layer's internal modules.
 - **FR-005**: Transaction-boundary control (begin/commit/rollback) MUST be owned by whichever business layer (transactions or analytics) understands the invariant being protected, never by the database-access layer.
 - **FR-006**: The transactions layer and the analytics layer MUST NOT import each other's internal modules directly; any interaction between them MUST go through the database-access layer or explicitly shared infrastructure.
 - **FR-007**: The refactor MUST NOT change any API request/response shape, error code, or HTTP status code documented in the existing contracts.
@@ -87,8 +88,8 @@ A maintainer changing how the popular-items window is computed, recomputed, or r
 ### Key Entities
 
 - **API Layer**: The set of FastAPI routers and request/response handling code; the only layer that speaks HTTP.
-- **Transactions Layer**: Owns transaction lifecycle, stock decrement, low-stock alerting, and transaction abandonment — the business rules governing an individual checkout.
-- **Analytics Layer**: Owns the popular-items hopping-window computation, recompute scheduling, and read path — the business rules governing aggregate reporting.
+- **Transactions Layer**: Owns transaction lifecycle, stock decrement, low-stock alert emission (write side), and transaction abandonment — the business rules governing an individual checkout.
+- **Analytics Layer**: Owns the popular-items hopping-window computation, recompute scheduling, and read path, plus the low-stock report read path — the business rules governing reporting on state that transactions produce.
 - **Database Access Layer**: The set of repository-style functions that are the only code in the system permitted to contain SQL.
 - **Shared Infrastructure**: Cross-cutting code usable by any layer without belonging to one — the in-memory catalog cache, the error-catalog contract, and money formatting.
 
@@ -103,7 +104,7 @@ A maintainer changing how the popular-items window is computed, recomputed, or r
 
 ## Assumptions
 
-- The current `services/inventory.py` responsibilities (low-stock read, alert-crossing emission) fold into the Transactions layer rather than becoming a fifth layer, since alert emission is invoked from inside the transaction-completion invariant and the low-stock read has no independent locking behavior of its own.
+- The current `services/inventory.py` responsibilities split across two layers rather than becoming a fifth layer: alert-crossing emission goes to the Transactions layer, since it is invoked from inside the transaction-completion invariant; the low-stock read (`GET /inventory/low-stock`) goes to the Analytics layer, since it is a read-only report over state transactions produce, with no locking behavior of its own — the same shape as the popular-items report.
 - The in-memory catalog cache (`catalog_cache.py`) remains shared infrastructure outside the four layers rather than part of the database-access layer, since it is a process-lifetime cache rather than a per-request query.
 - `errors.py` (the `ApiError` contract) and `money.py` remain a shared kernel importable by every layer.
 - The existing contract/integration test suite, which drives the app over HTTP, is the authoritative regression check for this refactor; no new test infrastructure is required to consider this feature complete, though new layer-scoped unit tests are a reasonable follow-on and not blocking.
