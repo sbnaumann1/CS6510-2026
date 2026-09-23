@@ -1,4 +1,4 @@
-"""Transaction service: start, scan, complete, read.
+"""Transactions layer: start, scan, complete, read.
 
 The scan path is one CTE round trip (research R9). The completion path is one
 explicit DB transaction that takes stock locks in SKU order and applies a single
@@ -25,7 +25,7 @@ from app.errors import (
     ApiError,
 )
 from app.money import cents_to_amount
-from app.services import inventory
+from app.transactions.alerts import emit_crossings
 
 _TX_ID = re.compile(r"^tx-(\d+)$")
 
@@ -141,7 +141,7 @@ async def complete_transaction(session: AsyncSession, tx_id: int) -> dict[str, A
 
         # 5. Alert rows for any SKU that crossed the threshold on this
         #    completion, inside the same transaction as the decrement (SC-005).
-        await inventory.emit_crossings(
+        await emit_crossings(
             session,
             decremented,
             {b.sku: b.qty for b in basket},

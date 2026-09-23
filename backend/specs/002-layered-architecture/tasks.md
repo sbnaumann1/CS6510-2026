@@ -84,13 +84,13 @@ Single project rooted at `backend/` (unchanged from 001). All paths below are re
 
 ### Implementation for User Story 2
 
-- [ ] T019 [US2] Create `app/transactions/service.py`: move `parse_tx_id`, `public_id`, `start_transaction`, `scan_item`, `_raise_not_open_or_missing`, `complete_transaction`, `get_transaction` from `app/services/transactions.py` verbatim (already SQL-free after US1); update its call site for alert emission to import from `app.transactions.alerts` (T020)
-- [ ] T020 [US2] Create `app/transactions/alerts.py`: move `emit_crossings` from `app/services/inventory.py` verbatim (already calling `transactions_repo.insert_alerts` after US1)
-- [ ] T021 [US2] Create `app/transactions/sweeper.py`: move `sweep_abandoned` from `app/background.py` verbatim (already calling `transactions_repo.sweep_abandoned` after US1)
-- [ ] T022 [US2] Update `app/api/transactions.py` to import from `app.transactions.service` instead of `app.services.transactions` (`svc.start_transaction`, `svc.parse_tx_id`, `svc.scan_item`, `svc.complete_transaction`, `svc.get_transaction`)
-- [ ] T023 [US2] Update `app/main.py`'s `_sweep_loop` to call `app.transactions.sweeper.sweep_abandoned` directly instead of `app.background.sweep_abandoned`
-- [ ] T024 [US2] Delete `start_transaction`/`scan_item`/`complete_transaction`/`get_transaction`/`parse_tx_id`/`public_id`/`_raise_not_open_or_missing` from `app/services/transactions.py` and `emit_crossings` from `app/services/inventory.py`, and delete `sweep_abandoned` from `app/background.py` — each has now been moved, not copied
-- [ ] T025 [US2] Run `test_transactions_*`, `test_checkout_flow`, `test_concurrent_completion`, the completion half of `test_low_stock`, and the full suite; run `grep -rn "text(" app/transactions` and `grep -rn "from app.analytics\|import app.analytics" app/transactions` (both must print nothing)
+- [X] T019 [US2] Create `app/transactions/service.py`: move `parse_tx_id`, `public_id`, `start_transaction`, `scan_item`, `_raise_not_open_or_missing`, `complete_transaction`, `get_transaction` from `app/services/transactions.py` verbatim (already SQL-free after US1); update its call site for alert emission to import from `app.transactions.alerts` (T020)
+- [X] T020 [US2] Create `app/transactions/alerts.py`: move `emit_crossings` from `app/services/inventory.py` verbatim (already calling `transactions_repo.insert_alerts` after US1)
+- [X] T021 [US2] Create `app/transactions/sweeper.py`: move `sweep_abandoned` from `app/background.py` verbatim (already calling `transactions_repo.sweep_abandoned` after US1)
+- [X] T022 [US2] Update `app/api/transactions.py` to import from `app.transactions.service` instead of `app.services.transactions` (`svc.start_transaction`, `svc.parse_tx_id`, `svc.scan_item`, `svc.complete_transaction`, `svc.get_transaction`)
+- [X] T023 [US2] Update `app/main.py`'s `_sweep_loop` to call `app.transactions.sweeper.sweep_abandoned` directly instead of `app.background.sweep_abandoned`
+- [X] T024 [US2] Delete `start_transaction`/`scan_item`/`complete_transaction`/`get_transaction`/`parse_tx_id`/`public_id`/`_raise_not_open_or_missing` from `app/services/transactions.py` and `emit_crossings` from `app/services/inventory.py`, and delete `sweep_abandoned` from `app/background.py` — each has now been moved, not copied
+- [X] T025 [US2] Run `test_transactions_*`, `test_checkout_flow`, `test_concurrent_completion`, the completion half of `test_low_stock`, and the full suite; run `grep -rn "text(" app/transactions` and `grep -rn "from app.analytics\|import app.analytics" app/transactions` (both must print nothing)
 
 **Checkpoint**: Transactions layer fully consolidated and independently testable. `app/services/transactions.py` is now empty except imports; `app/services/inventory.py` retains only the low-stock read; `app/background.py` retains only the recompute-scheduling half.
 

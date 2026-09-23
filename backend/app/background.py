@@ -1,17 +1,11 @@
-"""Out-of-band work: window recompute and the abandoned-transaction sweeper."""
+"""Out-of-band work: popular-window recompute."""
 
 from __future__ import annotations
 
 import logging
 
 from app.config import settings
-from app.db import (
-    POPULAR_RECOMPUTE_LOCK,
-    SessionLocal,
-    advisory_lock,
-    engine,
-    transactions_repo,
-)
+from app.db import POPULAR_RECOMPUTE_LOCK, SessionLocal, advisory_lock, engine
 from app.services import analytics
 
 log = logging.getLogger("checkout")
@@ -40,15 +34,3 @@ async def recompute_window() -> None:
                     await analytics.recompute(session)
     except Exception:  # never let background work surface as a request error
         log.exception("popular-window recompute failed")
-
-
-async def sweep_abandoned() -> int:
-    """Cancel OPEN transactions older than TX_ABANDON_MINUTES.
-
-    No stock is decremented for them — stock moves only at completion (INV-6).
-    Uses the transaction_open_started_idx partial index.
-    """
-    async with SessionLocal() as session:
-        n = await transactions_repo.sweep_abandoned(session, settings.tx_abandon_minutes)
-        await session.commit()
-        return n

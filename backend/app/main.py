@@ -10,11 +10,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import ORJSONResponse
 
-from app import background, catalog_cache
+from app import catalog_cache
 from app.api import analytics, catalog, inventory, transactions
 from app.config import settings
 from app.db import SessionLocal, dispose_engine
 from app.errors import register_error_handlers
+from app.transactions import sweeper
 
 log = logging.getLogger("checkout")
 
@@ -45,7 +46,7 @@ async def _sweep_loop() -> None:
     while True:
         await asyncio.sleep(interval)
         try:
-            n = await background.sweep_abandoned()
+            n = await sweeper.sweep_abandoned()
             if n:
                 log.info("swept %d abandoned transaction(s)", n)
         except Exception:

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import background
 from app.api._request import _json_body, _required_str
 from app.db import get_session
-from app.services import transactions as svc
+from app.transactions import service as svc
 
 router = APIRouter(tags=["transactions"])
 
