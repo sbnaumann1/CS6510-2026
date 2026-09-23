@@ -6,42 +6,16 @@ the hot paths (research R7), and error precedence follows error-catalog.md.
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from fastapi.responses import ORJSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import background
+from app.api._request import _json_body, _required_str
 from app.db import get_session
-from app.errors import INVALID_REQUEST, ApiError
 from app.services import transactions as svc
 
 router = APIRouter(tags=["transactions"])
-
-
-async def _json_body(request: Request, *, required: bool) -> dict[str, Any]:
-    raw = await request.body()
-    if not raw:
-        if required:
-            raise ApiError(INVALID_REQUEST, "A JSON body is required.")
-        return {}
-    try:
-        import orjson
-
-        body = orjson.loads(raw)
-    except Exception:
-        raise ApiError(INVALID_REQUEST, "Request body is not valid JSON.") from None
-    if not isinstance(body, dict):
-        raise ApiError(INVALID_REQUEST, "Request body must be a JSON object.")
-    return body
-
-
-def _required_str(body: dict[str, Any], field: str) -> str:
-    value = body.get(field)
-    if not isinstance(value, str) or not value:
-        raise ApiError(INVALID_REQUEST, f"'{field}' must be a non-empty string.")
-    return value
 
 
 @router.post("/transactions", status_code=201)

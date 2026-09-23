@@ -29,10 +29,10 @@ Single project rooted at `backend/` (unchanged from 001). All paths below are re
 
 **Purpose**: Create the target package skeleton before any logic moves into it
 
-- [ ] T001 Convert `app/db.py` into `app/db/__init__.py` (pure file move, no logic change): the module content — `engine`, `SessionLocal`, `get_session`, `advisory_lock`, `dispose_engine`, `POPULAR_RECOMPUTE_LOCK` — is unchanged, only its path becomes a package so `app/db/transactions_repo.py` and `app/db/analytics_repo.py` (Phase 3) have somewhere to live; every existing `from app.db import ...` call site keeps working unmodified
-- [ ] T002 [P] Create `app/transactions/__init__.py` (empty package init)
-- [ ] T003 [P] Create `app/analytics/__init__.py` (empty package init)
-- [ ] T004 Run `uv run pytest` to confirm the T001 package conversion is behavior-preserving before any repository code is added
+- [X] T001 Convert `app/db.py` into `app/db/__init__.py` (pure file move, no logic change): the module content — `engine`, `SessionLocal`, `get_session`, `advisory_lock`, `dispose_engine`, `POPULAR_RECOMPUTE_LOCK` — is unchanged, only its path becomes a package so `app/db/transactions_repo.py` and `app/db/analytics_repo.py` (Phase 3) have somewhere to live; every existing `from app.db import ...` call site keeps working unmodified
+- [X] T002 [P] Create `app/transactions/__init__.py` (empty package init)
+- [X] T003 [P] Create `app/analytics/__init__.py` (empty package init)
+- [X] T004 Run `uv run pytest` to confirm the T001 package conversion is behavior-preserving before any repository code is added
 
 **Checkpoint**: Target package layout exists; nothing has moved yet; full suite green
 
@@ -44,10 +44,10 @@ Single project rooted at `backend/` (unchanged from 001). All paths below are re
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T005 Create `app/api/_request.py` containing `_json_body` and `_required_str` (moved verbatim from `app/api/transactions.py` lines 23–44) and `positive_int_param` (moved verbatim from `app/api/inventory.py` lines 17–29)
-- [ ] T006 [P] Update `app/api/transactions.py` to import `_json_body`/`_required_str` from `app.api._request` and delete its local definitions
-- [ ] T007 [P] Update `app/api/inventory.py` to import `positive_int_param` from `app.api._request` and delete its local definition; update `app/api/analytics.py` to import `positive_int_param` from `app.api._request` instead of from `app.api.inventory` (removing the current sideways router-to-router import)
-- [ ] T008 Run `uv run pytest` to confirm the helper extraction is behavior-preserving
+- [X] T005 Create `app/api/_request.py` containing `_json_body` and `_required_str` (moved verbatim from `app/api/transactions.py` lines 23–44) and `positive_int_param` (moved verbatim from `app/api/inventory.py` lines 17–29)
+- [X] T006 [P] Update `app/api/transactions.py` to import `_json_body`/`_required_str` from `app.api._request` and delete its local definitions
+- [X] T007 [P] Update `app/api/inventory.py` to import `positive_int_param` from `app.api._request` and delete its local definition; update `app/api/analytics.py` to import `positive_int_param` from `app.api._request` instead of from `app.api.inventory` (removing the current sideways router-to-router import)
+- [X] T008 Run `uv run pytest` to confirm the helper extraction is behavior-preserving
 
 **Checkpoint**: No API router imports from another API router; foundation ready for the database-access extraction
 
@@ -61,16 +61,16 @@ Single project rooted at `backend/` (unchanged from 001). All paths below are re
 
 ### Implementation for User Story 1
 
-- [ ] T009 [P] [US1] Create `app/db/transactions_repo.py` with `insert_transaction(session, station_id)`, `scan_item(session, tx_id, sku, price_cents)`, `get_status(session, tx_id)`, `lock_transaction(session, tx_id)`, `get_basket(session, tx_id)`, `lock_stock(session, skus)`, `decrement_stock(session, basket, tx_id)`, `complete_transaction(session, tx_id, total_cents)`, `get_transaction(session, tx_id)` — moving the SQL from `app/services/transactions.py`'s `_INSERT_TX`, `_SCAN`, `_TX_STATUS`, `_LOCK_TX`, `_BASKET`, `_LOCK_STOCK`, the inline `UPDATE ... FROM (VALUES ...)` decrement, `_COMPLETE_TX`, and `_GET_TX` respectively (signatures and return shapes per data-model.md's `transactions_repo.py` table); no function calls `commit`/`rollback`/`begin`
-- [ ] T010 [P] [US1] Add `insert_alerts(session, crossings)` to `app/db/transactions_repo.py`, moving the `_INSERT_ALERT` statement from `app/services/inventory.py`
-- [ ] T011 [P] [US1] Add `sweep_abandoned(session, minutes)` to `app/db/transactions_repo.py`, moving the inline `UPDATE transaction SET status = 'CANCELLED' WHERE status = 'OPEN' AND started_at < now() - make_interval(mins => :mins)` statement out of `app/background.py`'s `sweep_abandoned` function, returning the rowcount
-- [ ] T012 [P] [US1] Create `app/db/analytics_repo.py` with `max_scan_seq(session)`, `window_counts(session, start, end, depth)`, `upsert_snapshot(session, window_size, slide_interval, start, end, ranking_json)`, `read_snapshot(session)` — moving `_MAX_SEQ`, `_WINDOW_COUNTS`, `_UPSERT`, `_READ` from `app/services/analytics.py` (signatures per data-model.md's `analytics_repo.py` table)
-- [ ] T013 [P] [US1] Add `low_stock_report(session, threshold)` and `now(session)` to `app/db/analytics_repo.py`, moving the `_LOW_STOCK` statement and the `SELECT now()` (`_NOW`) statement from `app/services/inventory.py`
-- [ ] T014 [US1] Update `app/services/transactions.py` to call the T009 repository functions in place of its inline `text()` statements; keep `session.begin()`/`.commit()`/`.rollback()` calls and all business logic (id parsing, error raising, response shaping) exactly where they are; delete the now-unused module-level SQL constants
-- [ ] T015 [US1] Update `app/services/inventory.py`'s `emit_crossings` to call `transactions_repo.insert_alerts` (T010) and its `low_stock` function to call `analytics_repo.low_stock_report`/`analytics_repo.now` (T013); delete the now-unused module-level SQL constants — do not move either function to a new file yet, that is Phase 4/5
-- [ ] T016 [US1] Update `app/services/analytics.py` to call the T012 repository functions in place of its inline `text()` statements; delete the now-unused module-level SQL constants
-- [ ] T017 [US1] Update `app/background.py`'s `sweep_abandoned` to call `transactions_repo.sweep_abandoned` (T011) in place of its inline `text()` statement
-- [ ] T018 [US1] Run `uv run pytest` (full suite must pass unchanged) and `grep -rn "text(" app/services app/background.py` (must print nothing) to close out this story
+- [X] T009 [P] [US1] Create `app/db/transactions_repo.py` with `insert_transaction(session, station_id)`, `scan_item(session, tx_id, sku, price_cents)`, `get_status(session, tx_id)`, `lock_transaction(session, tx_id)`, `get_basket(session, tx_id)`, `lock_stock(session, skus)`, `decrement_stock(session, basket, tx_id)`, `complete_transaction(session, tx_id, total_cents)`, `get_transaction(session, tx_id)` — moving the SQL from `app/services/transactions.py`'s `_INSERT_TX`, `_SCAN`, `_TX_STATUS`, `_LOCK_TX`, `_BASKET`, `_LOCK_STOCK`, the inline `UPDATE ... FROM (VALUES ...)` decrement, `_COMPLETE_TX`, and `_GET_TX` respectively (signatures and return shapes per data-model.md's `transactions_repo.py` table); no function calls `commit`/`rollback`/`begin`
+- [X] T010 [P] [US1] Add `insert_alerts(session, crossings)` to `app/db/transactions_repo.py`, moving the `_INSERT_ALERT` statement from `app/services/inventory.py`
+- [X] T011 [P] [US1] Add `sweep_abandoned(session, minutes)` to `app/db/transactions_repo.py`, moving the inline `UPDATE transaction SET status = 'CANCELLED' WHERE status = 'OPEN' AND started_at < now() - make_interval(mins => :mins)` statement out of `app/background.py`'s `sweep_abandoned` function, returning the rowcount
+- [X] T012 [P] [US1] Create `app/db/analytics_repo.py` with `max_scan_seq(session)`, `window_counts(session, start, end, depth)`, `upsert_snapshot(session, window_size, slide_interval, start, end, ranking_json)`, `read_snapshot(session)` — moving `_MAX_SEQ`, `_WINDOW_COUNTS`, `_UPSERT`, `_READ` from `app/services/analytics.py` (signatures per data-model.md's `analytics_repo.py` table)
+- [X] T013 [P] [US1] Add `low_stock_report(session, threshold)` and `now(session)` to `app/db/analytics_repo.py`, moving the `_LOW_STOCK` statement and the `SELECT now()` (`_NOW`) statement from `app/services/inventory.py`
+- [X] T014 [US1] Update `app/services/transactions.py` to call the T009 repository functions in place of its inline `text()` statements; keep `session.begin()`/`.commit()`/`.rollback()` calls and all business logic (id parsing, error raising, response shaping) exactly where they are; delete the now-unused module-level SQL constants
+- [X] T015 [US1] Update `app/services/inventory.py`'s `emit_crossings` to call `transactions_repo.insert_alerts` (T010) and its `low_stock` function to call `analytics_repo.low_stock_report`/`analytics_repo.now` (T013); delete the now-unused module-level SQL constants — do not move either function to a new file yet, that is Phase 4/5
+- [X] T016 [US1] Update `app/services/analytics.py` to call the T012 repository functions in place of its inline `text()` statements; delete the now-unused module-level SQL constants
+- [X] T017 [US1] Update `app/background.py`'s `sweep_abandoned` to call `transactions_repo.sweep_abandoned` (T011) in place of its inline `text()` statement
+- [X] T018 [US1] Run `uv run pytest` (full suite must pass unchanged) and `grep -rn "text(" app/services app/background.py` (must print nothing) to close out this story
 
 **Checkpoint**: At this point, `app/services/*.py` and `app/background.py` contain zero SQL — all of it lives in `app/db/`. Business logic has not moved yet; that is what US2 and US3 do next.
 

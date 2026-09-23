@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import ORJSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.inventory import positive_int_param
+from app.api._request import positive_int_param
 from app.db import get_session
 from app.services import analytics as svc
 

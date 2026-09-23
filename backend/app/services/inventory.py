@@ -4,40 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Live stock joined to the most recent alert row per SKU (data-model.md). The
-# alert row supplies only the timestamp; currentStock always comes from live
-# inventory. Ordering by alert time then SKU satisfies FR-007's "timestamp order"
-# while staying deterministic for SKUs that have no alert row (possible when
-# ?threshold= is raised above the configured default).
-_LOW_STOCK = text(
-    """
-SELECT c.sku, c.name, s.current_stock,
-       COALESCE(a.triggered_at, now()) AS triggered_at
-  FROM inventory_stock s
-  JOIN catalog_item c USING (sku)
-  LEFT JOIN LATERAL (
-        SELECT triggered_at FROM low_stock_alert
-         WHERE sku = s.sku ORDER BY triggered_at DESC LIMIT 1
-  ) a ON TRUE
- WHERE s.current_stock < :threshold
- ORDER BY a.triggered_at NULLS LAST, c.sku
-"""
-)
-
-_NOW = text("SELECT now()")
-
-_INSERT_ALERT = text(
-    "INSERT INTO low_stock_alert (sku, current_stock, threshold)"
-    " VALUES (:sku, :current_stock, :threshold)"
-)
+from app.db import analytics_repo, transactions_repo
 
 
 async def low_stock(session: AsyncSession, threshold: int) -> dict[str, Any]:
-    rows = (await session.execute(_LOW_STOCK, {"threshold": threshold})).all()
-    generated_at = await session.scalar(_NOW)
+    rows = await analytics_repo.low_stock_report(session, threshold)
+    generated_at = await analytics_repo.now(session)
     return {
         "threshold": threshold,
         "generatedAt": generated_at.isoformat(),
@@ -73,4 +47,4 @@ async def emit_crossings(
         if row.current_stock < threshold <= row.current_stock + qty_by_sku[row.sku]
     ]
     if crossings:
-        await session.execute(_INSERT_ALERT, crossings)
+        await transactions_repo.insert_alerts(session, crossings)

@@ -11,11 +11,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import catalog_cache
 from app.config import settings
+from app.db import transactions_repo as repo
 from app.errors import (
     EMPTY_BASKET,
     INSUFFICIENT_STOCK,
@@ -42,63 +42,8 @@ def public_id(tx_id: int) -> str:
     return f"tx-{tx_id}"
 
 
-_INSERT_TX = text(
-    "INSERT INTO transaction (station_id) VALUES (:station_id)"
-    " RETURNING id, status, item_count, running_total_cents, started_at"
-)
-
-# R9: update the denormalized counters, insert the line, and return both in one
-# round trip. `scan_seq` is the global scan sequence feeding the analytics window.
-_SCAN = text(
-    """
-WITH tx AS (
-  UPDATE transaction
-     SET item_count = item_count + 1,
-         running_total_cents = running_total_cents + :price_cents
-   WHERE id = :tx_id AND status = 'OPEN'
-  RETURNING id, item_count, running_total_cents
-), ins AS (
-  INSERT INTO transaction_item (transaction_id, sku, unit_price_cents)
-  SELECT id, :sku, :price_cents FROM tx
-  RETURNING id
-)
-SELECT tx.item_count, tx.running_total_cents, (SELECT id FROM ins) AS scan_seq
-  FROM tx
-"""
-)
-
-_TX_STATUS = text("SELECT status FROM transaction WHERE id = :tx_id")
-
-_LOCK_TX = text(
-    "SELECT status, station_id, started_at FROM transaction"
-    " WHERE id = :tx_id FOR UPDATE"
-)
-
-_BASKET = text(
-    "SELECT sku, count(*) AS qty FROM transaction_item"
-    " WHERE transaction_id = :tx_id GROUP BY sku ORDER BY sku"
-)
-
-# R10 step 3: one deterministic lock order for every concurrent completion, which
-# is what makes deadlock structurally impossible.
-_LOCK_STOCK = text(
-    "SELECT sku FROM inventory_stock WHERE sku = ANY(:skus) ORDER BY sku FOR UPDATE"
-).bindparams(bindparam("skus", type_=ARRAY(Text)))
-
-_COMPLETE_TX = text(
-    "UPDATE transaction"
-    "   SET status = 'COMPLETED', completed_at = now(), total_amount_cents = :total"
-    " WHERE id = :tx_id RETURNING completed_at"
-)
-
-_GET_TX = text(
-    "SELECT id, station_id, status, item_count, running_total_cents, started_at"
-    "  FROM transaction WHERE id = :tx_id"
-)
-
-
 async def start_transaction(session: AsyncSession, station_id: str) -> dict[str, Any]:
-    row = (await session.execute(_INSERT_TX, {"station_id": station_id})).one()
+    row = await repo.insert_transaction(session, station_id)
     await session.commit()
     return {
         "transactionId": public_id(row.id),
@@ -121,11 +66,7 @@ async def scan_item(
         raise ApiError(SKU_NOT_FOUND, f"SKU {sku} was not found.")
     name, price_cents = entry
 
-    row = (
-        await session.execute(
-            _SCAN, {"tx_id": tx_id, "sku": sku, "price_cents": price_cents}
-        )
-    ).first()
+    row = await repo.scan_item(session, tx_id, sku, price_cents)
 
     if row is None:
         await session.rollback()
@@ -147,7 +88,7 @@ async def scan_item(
 
 async def _raise_not_open_or_missing(session: AsyncSession, tx_id: int) -> None:
     """The rare path: decide between 404 and 409 with one cheap query."""
-    status = await session.scalar(_TX_STATUS, {"tx_id": tx_id})
+    status = await repo.get_status(session, tx_id)
     if status is None:
         raise ApiError(
             TRANSACTION_NOT_FOUND, f"Transaction {public_id(tx_id)} was not found."
@@ -162,7 +103,7 @@ async def complete_transaction(session: AsyncSession, tx_id: int) -> dict[str, A
     async with session.begin():
         # 1. Lock the transaction row. This also serializes two concurrent
         #    completes of the same transaction, so no double decrement (INV-3).
-        tx = (await session.execute(_LOCK_TX, {"tx_id": tx_id})).first()
+        tx = await repo.lock_transaction(session, tx_id)
         if tx is None:
             raise ApiError(
                 TRANSACTION_NOT_FOUND, f"Transaction {public_id(tx_id)} was not found."
@@ -175,7 +116,7 @@ async def complete_transaction(session: AsyncSession, tx_id: int) -> dict[str, A
             )
 
         # 2. Collapse the basket to (sku, qty) in SKU order.
-        basket = (await session.execute(_BASKET, {"tx_id": tx_id})).all()
+        basket = await repo.get_basket(session, tx_id)
         if not basket:
             raise ApiError(
                 EMPTY_BASKET, f"Transaction {public_id(tx_id)} has no scanned items."
@@ -184,32 +125,12 @@ async def complete_transaction(session: AsyncSession, tx_id: int) -> dict[str, A
         skus = [b.sku for b in basket]
 
         # 3. Acquire every stock lock in one deterministic order.
-        await session.execute(_LOCK_STOCK, {"skus": skus})
+        await repo.lock_stock(session, skus)
 
-        # 4. One conditional batched decrement. The WHERE clause is what
+        # 4. One conditional batched decrement. Its WHERE clause is what
         #    guarantees stock never goes negative; a short count means at least
         #    one SKU could not satisfy its quantity, so the whole thing rolls back.
-        values = ", ".join(
-            f"(CAST(:sku{i} AS text), CAST(:qty{i} AS integer))"
-            for i in range(len(basket))
-        )
-        params: dict[str, Any] = {"tx_id": tx_id}
-        for i, b in enumerate(basket):
-            params[f"sku{i}"] = b.sku
-            params[f"qty{i}"] = b.qty
-
-        decremented = (
-            await session.execute(
-                text(
-                    "UPDATE inventory_stock s"
-                    "   SET current_stock = s.current_stock - v.qty"
-                    f"  FROM (VALUES {values}) AS v(sku, qty)"
-                    "  WHERE s.sku = v.sku AND s.current_stock >= v.qty"
-                    " RETURNING s.sku, s.current_stock"
-                ),
-                params,
-            )
-        ).all()
+        decremented = await repo.decrement_stock(session, basket)
 
         if len(decremented) < len(basket):
             short = sorted(set(skus) - {d.sku for d in decremented})
@@ -231,9 +152,7 @@ async def complete_transaction(session: AsyncSession, tx_id: int) -> dict[str, A
         total_cents = sum(
             catalog_cache.get(b.sku)[1] * b.qty for b in basket  # type: ignore[index]
         )
-        completed_at = await session.scalar(
-            _COMPLETE_TX, {"tx_id": tx_id, "total": total_cents}
-        )
+        completed_at = await repo.complete_transaction(session, tx_id, total_cents)
 
         # 7. Build the receipt from the basket plus the in-memory catalog.
         lines = []
@@ -260,7 +179,7 @@ async def complete_transaction(session: AsyncSession, tx_id: int) -> dict[str, A
 
 
 async def get_transaction(session: AsyncSession, tx_id: int) -> dict[str, Any]:
-    row = (await session.execute(_GET_TX, {"tx_id": tx_id})).first()
+    row = await repo.get_transaction(session, tx_id)
     if row is None:
         raise ApiError(
             TRANSACTION_NOT_FOUND, f"Transaction {public_id(tx_id)} was not found."

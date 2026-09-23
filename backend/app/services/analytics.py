@@ -10,47 +10,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import text
+import orjson
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import catalog_cache
 from app.config import settings
+from app.db import analytics_repo as repo
 
 # Top 200 covers any sane ?limit=; names and rank are attached at read time from
 # the catalog cache, so the stored blob stays small.
 RANKING_DEPTH = 200
-
-_MAX_SEQ = text("SELECT coalesce(max(id), 0) FROM transaction_item")
-
-_WINDOW_COUNTS = text(
-    "SELECT sku, count(*) AS scan_count"
-    "  FROM transaction_item"
-    " WHERE id > :window_start AND id <= :window_end"
-    " GROUP BY sku"
-    " ORDER BY count(*) DESC, sku"
-    " LIMIT :depth"
-)
-
-_UPSERT = text(
-    """
-INSERT INTO popular_window_snapshot
-       (id, window_size, slide_interval, window_start, window_end, computed_at, ranking)
-VALUES (1, :window_size, :slide_interval, :window_start, :window_end, now(),
-        CAST(:ranking AS jsonb))
-ON CONFLICT (id) DO UPDATE
-   SET window_size   = EXCLUDED.window_size,
-       slide_interval = EXCLUDED.slide_interval,
-       window_start  = EXCLUDED.window_start,
-       window_end    = EXCLUDED.window_end,
-       computed_at   = EXCLUDED.computed_at,
-       ranking       = EXCLUDED.ranking
-"""
-)
-
-_READ = text(
-    "SELECT window_size, slide_interval, window_start, window_end, computed_at, ranking"
-    "  FROM popular_window_snapshot WHERE id = 1"
-)
 
 
 def _bounds(max_seq: int) -> tuple[int, int]:
@@ -60,32 +29,22 @@ def _bounds(max_seq: int) -> tuple[int, int]:
 
 
 async def _counts(session: AsyncSession, start: int, end: int) -> list[dict[str, Any]]:
-    rows = (
-        await session.execute(
-            _WINDOW_COUNTS,
-            {"window_start": start, "window_end": end, "depth": RANKING_DEPTH},
-        )
-    ).all()
+    rows = await repo.window_counts(session, start, end, RANKING_DEPTH)
     return [{"sku": r.sku, "scanCount": r.scan_count} for r in rows]
 
 
 async def recompute(session: AsyncSession) -> None:
     """Recompute the window and replace the snapshot row."""
-    import orjson
-
-    max_seq = await session.scalar(_MAX_SEQ)
-    start, end = _bounds(max_seq or 0)
+    start, end = _bounds(await repo.max_scan_seq(session))
     ranking = await _counts(session, start, end)
 
-    await session.execute(
-        _UPSERT,
-        {
-            "window_size": settings.popular_window_size,
-            "slide_interval": settings.popular_slide_interval,
-            "window_start": start,
-            "window_end": end,
-            "ranking": orjson.dumps(ranking).decode(),
-        },
+    await repo.upsert_snapshot(
+        session,
+        settings.popular_window_size,
+        settings.popular_slide_interval,
+        start,
+        end,
+        orjson.dumps(ranking).decode(),
     )
     await session.commit()
 
@@ -116,7 +75,7 @@ def _render(
 
 
 async def read(session: AsyncSession, limit: int) -> dict[str, Any]:
-    row = (await session.execute(_READ)).first()
+    row = await repo.read_snapshot(session)
     if row is not None:
         return _render(
             row.ranking,
@@ -129,8 +88,7 @@ async def read(session: AsyncSession, limit: int) -> dict[str, Any]:
     # No snapshot yet — fewer than one slide into the run. Compute on demand over
     # whatever scans exist; this is the spec's "fewer than N items" edge case and
     # the reason windowStart can be 0.
-    max_seq = await session.scalar(_MAX_SEQ)
-    start, end = _bounds(max_seq or 0)
+    start, end = _bounds(await repo.max_scan_seq(session))
     ranking = await _counts(session, start, end)
-    now = await session.scalar(text("SELECT now()"))
+    now = await repo.now(session)
     return _render(ranking, limit, start, end, now.isoformat())

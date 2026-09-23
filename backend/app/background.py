@@ -5,7 +5,13 @@ from __future__ import annotations
 import logging
 
 from app.config import settings
-from app.db import POPULAR_RECOMPUTE_LOCK, SessionLocal, advisory_lock, engine
+from app.db import (
+    POPULAR_RECOMPUTE_LOCK,
+    SessionLocal,
+    advisory_lock,
+    engine,
+    transactions_repo,
+)
 from app.services import analytics
 
 log = logging.getLogger("checkout")
@@ -42,16 +48,7 @@ async def sweep_abandoned() -> int:
     No stock is decremented for them — stock moves only at completion (INV-6).
     Uses the transaction_open_started_idx partial index.
     """
-    from sqlalchemy import text
-
     async with SessionLocal() as session:
-        result = await session.execute(
-            text(
-                "UPDATE transaction SET status = 'CANCELLED'"
-                " WHERE status = 'OPEN'"
-                "   AND started_at < now() - make_interval(mins => :mins)"
-            ),
-            {"mins": settings.tx_abandon_minutes},
-        )
+        n = await transactions_repo.sweep_abandoned(session, settings.tx_abandon_minutes)
         await session.commit()
-        return result.rowcount or 0
+        return n
