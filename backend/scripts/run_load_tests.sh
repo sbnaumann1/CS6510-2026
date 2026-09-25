@@ -89,3 +89,25 @@ EOF
 done
 
 exit "$FAILED"
+
+# ---------------------------------------------------------------------------
+# Manual equivalent (001 quickstart V6 + V8), run from backend/. This script
+# does the same thing, restarting the server after each reseed:
+#
+#   # Normal run: 10 stations, 60 s
+#   uv run python scripts/seed.py --reset
+#   ./scripts/run_server.sh &                  # in its own terminal
+#   cd ../load-client && ./build.sh && ./run.sh --baseUrl=http://localhost:8080 --stations=10 --duration=60
+#   # stop the server (Ctrl-C)
+#   cd ../backend && uv run python scripts/verify_invariant.py
+#
+#   # Stress run: 100 stations, 120 s
+#   uv run python scripts/seed.py --reset
+#   ./scripts/run_server.sh &                  # in its own terminal
+#   cd ../load-client && ./run.sh --baseUrl=http://localhost:8080 --stations=100 --duration=120
+#   # stop the server (Ctrl-C)
+#   cd ../backend && uv run python scripts/verify_invariant.py
+#
+# Optional no-stock-out variant (001 V7): prefix the seed step with
+#   STOCK_PER_ITEM=200000
+# ---------------------------------------------------------------------------
