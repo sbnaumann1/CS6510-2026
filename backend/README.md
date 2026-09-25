@@ -1,15 +1,36 @@
-# Self-Checkout Backend — Monolith (FastAPI + PostgreSQL)
+# Self-Checkout Backend — Layered (FastAPI + PostgreSQL)
 
-Week 1 of the architecture series. Implements the frozen contract in
+Week 2 of the architecture series. Implements the frozen contract in
 [`spec.yaml`](./spec.yaml) as a single FastAPI service over one PostgreSQL
 instance, measured by the unmodified Java load client in `../load-client/`.
+Inside that one service, the code is split into four layers:
 
-Design artifacts live in [`specs/001-checkout-backend/`](./specs/001-checkout-backend/):
-[spec](./specs/001-checkout-backend/spec.md) ·
-[plan](./specs/001-checkout-backend/plan.md) ·
-[research](./specs/001-checkout-backend/research.md) ·
-[data model](./specs/001-checkout-backend/data-model.md) ·
-[quickstart](./specs/001-checkout-backend/quickstart.md)
+| Layer | Package | Owns |
+| --- | --- | --- |
+| API | `app/api/` | HTTP routes, request parsing, response shaping. No SQL. |
+| Transactions | `app/transactions/` | Start / scan / complete / get, the locked completion sequence, low-stock alert emission (write side), abandoned-transaction sweep |
+| Analytics | `app/analytics/` | Popular-items window (compute, schedule, read), low-stock report (read side) |
+| Database access | `app/db/` | Every SQL statement, as named repository functions. Never commits or rolls back; the business layers own transaction boundaries. |
+
+Transactions and Analytics never import each other. They only share data through the database.
+The API/DB boundary rules, and the greps that check them, are in
+[`layer-boundaries.md`](./specs/002-layered-architecture/contracts/layer-boundaries.md).
+Week 1 was the same service without these boundaries: business logic and SQL were mixed together
+in `app/services/`.
+
+Design artifacts:
+- Week 2 (this layering): [`specs/002-layered-architecture/`](./specs/002-layered-architecture/):
+  [spec](./specs/002-layered-architecture/spec.md) ·
+  [plan](./specs/002-layered-architecture/plan.md) ·
+  [research](./specs/002-layered-architecture/research.md) ·
+  [data model](./specs/002-layered-architecture/data-model.md) ·
+  [quickstart](./specs/002-layered-architecture/quickstart.md)
+- Week 1 (behavior, schema, contract; still authoritative): [`specs/001-checkout-backend/`](./specs/001-checkout-backend/):
+  [spec](./specs/001-checkout-backend/spec.md) ·
+  [plan](./specs/001-checkout-backend/plan.md) ·
+  [research](./specs/001-checkout-backend/research.md) ·
+  [data model](./specs/001-checkout-backend/data-model.md) ·
+  [quickstart](./specs/001-checkout-backend/quickstart.md)
 
 ## Prerequisites
 
@@ -75,6 +96,19 @@ cd ../backend && uv run python scripts/verify_invariant.py
 ```
 
 Stress run is the same client with `--stations=100 --duration=120`.
+
+`scripts/run_load_tests.sh` does all of this end to end. For each run it reseeds, starts the
+server, runs the load client, stops the server, and verifies the invariant, then prints
+attempted / succeeded / failed counts:
+
+```bash
+./scripts/run_load_tests.sh                          # normal, then stress
+./scripts/run_load_tests.sh normal                   # or: stress
+STOCK_PER_ITEM=2000000 ./scripts/run_load_tests.sh   # clean run, nothing depletes
+```
+
+It reseeds the `checkout` database on every run. Stop any server on :8080 first, because the
+script starts its own.
 
 ## Inspect stock
 
@@ -167,16 +201,16 @@ psql -d checkout -tAc "SELECT sum(initial_stock - current_stock) FROM inventory_
 
 ## How it works
 
-| Concern | Approach |
-| --- | --- |
-| Catalog | Loaded once into memory; `GET /items` is a pre-rendered JSON body in ascending SKU order (the client's Zipf rank is positional) |
-| Scan | One CTE: bump the transaction's denormalized counters, insert the line, `RETURNING` both — one round trip |
-| Completion | One transaction: lock the tx row, collapse the basket, lock stock rows **in SKU order**, then one conditional batched `UPDATE ... WHERE current_stock >= qty`. A short row count rolls everything back as `409 INSUFFICIENT_STOCK` |
-| Never oversell | The conditional `UPDATE` is the mechanism; the `CHECK (current_stock >= 0)` is a backstop that should never fire |
-| No deadlocks | Every completion takes stock locks in the same SKU order, so a lock cycle cannot form |
-| Low-stock alerts | Written inside the completion transaction, only on a threshold crossing — one row per descent, committed atomically with the decrement |
-| Popular items | `transaction_item.id` is the global scan sequence; a hopping window is recomputed out of band every 500 scans into one snapshot row, so all workers agree |
-| Money | Integer cents end to end; converted to the contract's `number` once, at the JSON boundary |
+| Concern | Approach | Where |
+| --- | --- | --- |
+| Catalog | Loaded once into memory; `GET /items` is a pre-rendered JSON body in ascending SKU order (the client's Zipf rank is positional) | `catalog_cache.py` (shared) |
+| Scan | One CTE: bump the transaction's denormalized counters, insert the line, `RETURNING` both — one round trip | `transactions/service.py` → `db/transactions_repo.py` |
+| Completion | One transaction: lock the tx row, collapse the basket, lock stock rows **in SKU order**, then one conditional batched `UPDATE ... WHERE current_stock >= qty`. A short row count rolls everything back as `409 INSUFFICIENT_STOCK` | `transactions/service.py` owns the transaction; each step is a `transactions_repo` call |
+| Never oversell | The conditional `UPDATE` is the mechanism; the `CHECK (current_stock >= 0)` is a backstop that should never fire | `db/transactions_repo.py` `decrement_stock` |
+| No deadlocks | Every completion takes stock locks in the same SKU order, so a lock cycle cannot form | `db/transactions_repo.py` `lock_stock` |
+| Low-stock alerts | Written inside the completion transaction, only on a threshold crossing — one row per descent, committed atomically with the decrement. `GET /inventory/low-stock` reads them back | write: `transactions/alerts.py`; read: `analytics/low_stock.py` |
+| Popular items | `transaction_item.id` is the global scan sequence; a hopping window is recomputed out of band every 500 scans into one snapshot row, so all workers agree | `analytics/popular_items.py`, `analytics/scheduler.py` |
+| Money | Integer cents end to end; converted to the contract's `number` once, at the JSON boundary | `money.py` (shared) |
 
 ## Expected results
 
@@ -209,5 +243,6 @@ scripts/
   seed.py            deterministic reset
   verify_invariant.py  the graded correctness check
   run_server.sh
+  run_load_tests.sh  reseed → serve → load → verify, for normal and/or stress runs
 tests/               contract / integration / unit
 ```
