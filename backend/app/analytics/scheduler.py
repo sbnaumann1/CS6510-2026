@@ -6,7 +6,7 @@ import logging
 
 from app.config import settings
 from app.db import POPULAR_RECOMPUTE_LOCK, SessionLocal, advisory_lock, engine
-from app.analytics import popular_items
+from app.analytics import pipeline
 
 log = logging.getLogger("checkout")
 
@@ -31,6 +31,6 @@ async def recompute_window() -> None:
                 if not acquired:
                     return
                 async with SessionLocal() as session:
-                    await popular_items.recompute(session)
+                    await pipeline.recompute_windowed(session)
     except Exception:  # never let background work surface as a request error
         log.exception("popular-window recompute failed")
