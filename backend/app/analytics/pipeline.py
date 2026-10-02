@@ -3,7 +3,7 @@
 Real-time hopping-window architecture where scan events flow continuously
 through independent filters connected by asyncio queues:
 
-1. IngestFilter: Polls database for new scans, emits ScanData
+1. IngestFilter: Reads the latest WINDOW_SIZE scans from the database, emits ScanData
 2. WindowFilter: Maintains 1000-scan sliding buffer, emits WindowData every 500 scans
 3. AggregationFilter: Counts scans by SKU in current window
 4. RankingFilter: Ranks items by scan count, emits RankedData
@@ -109,35 +109,30 @@ class RankedData:
 
 
 class IngestFilter:
-    """Polls database for new scans and emits ScanData events.
-
-    Phase 1: Polling from database (simulates event stream)
-    Future: Can be replaced with event hooks from transaction layer
+    """Reads scans with start_after < id <= end from the database, in batches,
+    and emits each as ScanData, followed by TERMINATE.
     """
 
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, start_after: int, end: int):
         self.session = session
-        self.last_scan_id = 0
+        self.last_scan_id = start_after
+        self.end = end
 
     async def run(self, output_queue: asyncio.Queue) -> None:
-        """Poll database for new scans and emit ScanData.
-
-        Periodically queries transaction_item table for scans with id > last_scan_id.
-        Emits each as ScanData. When no more scans are available, emits TERMINATE.
-        """
         try:
-            while True:
+            while self.last_scan_id < self.end:
                 rows = await repo.get_scans_after(self.session, self.last_scan_id, limit=100)
                 if not rows:
-                    await output_queue.put(TERMINATE)
                     break
                 for row in rows:
-                    data = ScanData(sku=row.sku, scan_id=row.id)
-                    await output_queue.put(data)
+                    if row.id > self.end:
+                        self.last_scan_id = self.end
+                        break
+                    await output_queue.put(ScanData(sku=row.sku, scan_id=row.id))
                     self.last_scan_id = row.id
         except Exception as e:
             log.exception("IngestFilter error: %s", e)
-            await output_queue.put(TERMINATE)
+        await output_queue.put(TERMINATE)
 
 
 class WindowFilter:
@@ -343,31 +338,33 @@ class OutputFilter:
             log.exception("OutputFilter error: %s", e)
 
 
-async def run_streaming(session: AsyncSession) -> None:
+async def run_streaming(ingest_session: AsyncSession, output_session: AsyncSession) -> None:
     """Orchestrates streaming pipeline for popular items analytics.
 
-    Coordinates five filters connected by asyncio queues to process scans
-    in real-time. All filters run concurrently:
+    Coordinates five filters connected by asyncio queues. All filters run concurrently:
 
-    - IngestFilter: Polls database for new scans
+    - IngestFilter: Reads the latest WINDOW_SIZE scans from the database
     - WindowFilter: Maintains 1000-scan sliding buffer
     - AggregationFilter: Counts scans by SKU
     - RankingFilter: Ranks items by scan count
     - OutputFilter: Persists to database
 
-    Args:
-        session: Async database session for queries and persistence
+    Ingest and output need separate sessions: they run concurrently, and an
+    AsyncSession does not allow concurrent operations.
     """
+    end = await repo.max_scan_seq(ingest_session)
+    start_after = max(0, end - WINDOW_SIZE)
+
     ingest_queue = asyncio.Queue()
     window_queue = asyncio.Queue()
     agg_queue = asyncio.Queue()
     rank_queue = asyncio.Queue()
 
-    ingest = IngestFilter(session)
+    ingest = IngestFilter(ingest_session, start_after, end)
     window = WindowFilter()
     aggregation = AggregationFilter()
     ranking = RankingFilter()
-    output = OutputFilter(session)
+    output = OutputFilter(output_session)
 
     await asyncio.gather(
         ingest.run(ingest_queue),

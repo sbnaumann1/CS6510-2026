@@ -30,7 +30,7 @@ async def recompute_window() -> None:
             async with advisory_lock(conn, POPULAR_RECOMPUTE_LOCK) as acquired:
                 if not acquired:
                     return
-                async with SessionLocal() as session:
-                    await pipeline.run_streaming(session)
+                async with SessionLocal() as ingest_session, SessionLocal() as output_session:
+                    await pipeline.run_streaming(ingest_session, output_session)
     except Exception:  # never let background work surface as a request error
         log.exception("popular-window recompute failed")
