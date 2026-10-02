@@ -31,6 +31,6 @@ async def recompute_window() -> None:
                 if not acquired:
                     return
                 async with SessionLocal() as session:
-                    await pipeline.recompute_windowed(session)
+                    await pipeline.run_streaming(session)
     except Exception:  # never let background work surface as a request error
         log.exception("popular-window recompute failed")
