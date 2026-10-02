@@ -15,6 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 _MAX_SEQ = text("SELECT coalesce(max(id), 0) FROM transaction_item")
 
+_GET_SCANS = text(
+    "SELECT id, sku FROM transaction_item WHERE id > :last_id ORDER BY id LIMIT :limit"
+)
+
 _WINDOW_COUNTS = text(
     "SELECT sku, count(*) AS scan_count"
     "  FROM transaction_item"
@@ -28,7 +32,7 @@ _UPSERT = text(
     """
 INSERT INTO popular_window_snapshot
        (id, window_size, slide_interval, window_start, window_end, computed_at, ranking)
-VALUES (1, :window_size, :slide_interval, :window_start, :window_end, now(),
+VALUES (1, :window_size, :slide_interval, :window_start, :window_end, :computed_at,
         CAST(:ranking AS jsonb))
 ON CONFLICT (id) DO UPDATE
    SET window_size   = EXCLUDED.window_size,
@@ -72,6 +76,18 @@ async def max_scan_seq(session: AsyncSession) -> int:
     return (await session.scalar(_MAX_SEQ)) or 0
 
 
+async def get_scans_after(
+    session: AsyncSession, last_id: int, limit: int = 100
+) -> Sequence[Row]:
+    """Get (id, sku) for scans with id > last_id, ordered by id."""
+    return (
+        await session.execute(
+            _GET_SCANS,
+            {"last_id": last_id, "limit": limit},
+        )
+    ).all()
+
+
 async def window_counts(
     session: AsyncSession, start: int, end: int, depth: int
 ) -> Sequence[Row]:
@@ -91,7 +107,11 @@ async def upsert_snapshot(
     start: int,
     end: int,
     ranking_json: str,
+    computed_at: datetime | None = None,
 ) -> None:
+    if computed_at is None:
+        computed_at = await now(session)
+
     await session.execute(
         _UPSERT,
         {
@@ -99,6 +119,7 @@ async def upsert_snapshot(
             "slide_interval": slide_interval,
             "window_start": start,
             "window_end": end,
+            "computed_at": computed_at,
             "ranking": ranking_json,
         },
     )
