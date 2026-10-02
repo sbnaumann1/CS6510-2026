@@ -1,10 +1,12 @@
-# Self-Checkout Backend — Pipelined Analytics (FastAPI + PostgreSQL)
+# Self-Checkout Backend — Streaming Pipeline Analytics (FastAPI + PostgreSQL)
 
-Week 3 of the architecture series. Implements the frozen contract in
+Week 3+ of the architecture series. Implements the frozen contract in
 [`spec.yaml`](./spec.yaml) as a single FastAPI service over one PostgreSQL
 instance, measured by the unmodified Java load client in `../load-client/`.
-Inside that one service, the code is split into four layers, with Week 3
-introducing a **pipelined architecture for popular items analytics**:
+Inside that one service, the code is split into four layers, with Week 3+
+introducing a **streaming pipeline architecture for popular items analytics**:
+scans flow through five independent filters (ingest → window → aggregate → rank → output)
+connected by asyncio queues, enabling concurrent processing with dynamic ranking updates.
 
 | Layer | Package | Owns |
 | --- | --- | --- |
@@ -20,7 +22,14 @@ Week 1 was the same service without these boundaries: business logic and SQL wer
 in `app/services/`.
 
 Design artifacts:
-- Week 3 (this pipelined analytics): [`specs/003-pipelined-analytics/`](./specs/003-pipelined-analytics/):
+- Week 3+ (streaming pipeline — this implementation): [`specs/004-streaming-analytics/`](./specs/004-streaming-analytics/):
+  [spec](./specs/004-streaming-analytics/spec.md) ·
+  [plan](./specs/004-streaming-analytics/plan.md) ·
+  [research](./specs/004-streaming-analytics/research.md) ·
+  [data model](./specs/004-streaming-analytics/data-model.md) ·
+  [quickstart](./specs/004-streaming-analytics/quickstart.md) ·
+  [tasks](./specs/004-streaming-analytics/tasks.md)
+- Week 3 (batch-based pipelined analytics): [`specs/003-pipelined-analytics/`](./specs/003-pipelined-analytics/):
   [spec](./specs/003-pipelined-analytics/spec.md) ·
   [plan](./specs/003-pipelined-analytics/plan.md) ·
   [research](./specs/003-pipelined-analytics/research.md) ·
@@ -217,7 +226,7 @@ psql -d checkout -tAc "SELECT sum(initial_stock - current_stock) FROM inventory_
 | Never oversell | The conditional `UPDATE` is the mechanism; the `CHECK (current_stock >= 0)` is a backstop that should never fire | `db/transactions_repo.py` `decrement_stock` |
 | No deadlocks | Every completion takes stock locks in the same SKU order, so a lock cycle cannot form | `db/transactions_repo.py` `lock_stock` |
 | Low-stock alerts | Written inside the completion transaction, only on a threshold crossing — one row per descent, committed atomically with the decrement. `GET /inventory/low-stock` reads them back | write: `transactions/alerts.py`; read: `analytics/low_stock.py` |
-| Popular items | `transaction_item.id` is the global scan sequence; a hopping window is recomputed out of band every 500 scans via a **4-stage pipeline** (ingest → aggregate → rank → output). Filters run concurrently via asyncio queues, then all workers read the same snapshot | `analytics/pipeline.py` (IngestFilter, AggregationFilter, RankingFilter, OutputFilter), `analytics/scheduler.py`, `analytics/popular_items.py` (read-path) |
+| Popular items | `transaction_item.id` is the global scan sequence; a hopping window is recomputed out of band every 500 scans via a **5-stage streaming pipeline** (ingest → window → aggregate → rank → output). Scans flow as events through independent filters connected by asyncio queues; all filters run concurrently. Window is maintained in-memory (1000-scan circular buffer); ranking computed dynamically per window slide. | `analytics/pipeline.py` (IngestFilter, WindowFilter, AggregationFilter, RankingFilter, OutputFilter), `analytics/scheduler.py`, `analytics/popular_items.py` (read-path) |
 | Money | Integer cents end to end; converted to the contract's `number` once, at the JSON boundary | `money.py` (shared) |
 
 ## Expected results
@@ -237,8 +246,8 @@ app/                   four layers; see specs/002-layered-architecture/contracts
   api/               API layer: routes + request parsing (_request.py); no SQL
   transactions/      Transactions layer: lifecycle + completion invariant (service.py),
                      low-stock alert emission (alerts.py), abandoned-tx sweeper (sweeper.py)
-  analytics/         Analytics layer: pipelined popular-items computation (pipeline.py:
-                     IngestFilter, AggregationFilter, RankingFilter, OutputFilter),
+  analytics/         Analytics layer: streaming pipeline for popular-items (pipeline.py:
+                     IngestFilter→WindowFilter→AggregationFilter→RankingFilter→OutputFilter),
                      read-path for rankings (popular_items.py), low-stock report (low_stock.py),
                      recompute scheduling (scheduler.py)
   db/                Database access layer: engine/session/advisory lock (__init__.py),
