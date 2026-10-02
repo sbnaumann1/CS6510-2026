@@ -1,0 +1,63 @@
+PIPELINED POPULAR ITEMS ANALYTICS
+
+The system has a 4-stage pipeline:
+
+1. IngestFilter (reads from DB)
+   → AggregationFilter (buffers and forwards aggregated counts)
+   → RankingFilter (ranks items by scan count)
+   → OutputFilter (persists snapshot to DB)
+
+The pipes are implemented using Python asyncio queues for asynchronous inter-stage
+communication. Each filter runs concurrently and processes data as it becomes available
+from previous stages. Filters signal end-of-stream by sending None sentinel values.
+
+FILTER DESCRIPTIONS:
+
+IngestFilter:
+  Purpose: Reads scan data from the database within the current window bounds.
+  Input: Window start and end sequence numbers
+  Output: AggregatedData objects (sku, scan_count) for each item in top 200
+  Implementation: Executes window_counts query and emits each row asynchronously
+
+AggregationFilter:
+  Purpose: Provides isolation and buffering between ingestion and ranking stages.
+  Input: AggregatedData from IngestFilter queue
+  Output: AggregatedData forwarded to RankingFilter queue
+  Implementation: Simple forwarding stage that maintains queue separation
+
+RankingFilter:
+  Purpose: Accumulates aggregated data and ranks items by scan count.
+  Input: AggregatedData from AggregationFilter queue
+  Output: RankedData containing ranked items with metadata
+  Implementation: Collects all scan counts, ranks them, creates final output
+
+OutputFilter:
+  Purpose: Persists the computed window snapshot to the database.
+  Input: RankedData from RankingFilter queue
+  Output: Side effect only (writes to DB, commits transaction)
+  Implementation: Converts RankedData to JSON and upserts popular_window_snapshot table
+
+COMMUNICATION MODEL:
+
+Queues connect filters in a pipeline:
+  IngestFilter --[Queue1]--> AggregationFilter --[Queue2]--> RankingFilter --[Queue3]--> OutputFilter
+
+Each filter:
+- Reads from input queue (async wait if empty)
+- Processes the data
+- Writes to output queue
+- Sends None to signal end-of-stream
+
+EXECUTION:
+
+All four filters run concurrently via asyncio.gather(). Data flows through the pipeline
+stages asynchronously, allowing overlapping computation. The pipeline terminates when
+the OutputFilter receives the final None sentinel and completes its database commit.
+
+ADVANTAGES:
+
+- Concurrent execution of independent stages
+- Natural decomposition of analytics computation
+- Backpressure handling via queue sizes
+- Modularity and testability
+- Memory efficiency through streaming (no large intermediate collections)
