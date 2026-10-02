@@ -19,17 +19,17 @@
 
 **Purpose**: Initialize project structure and verify dependencies.
 
-- [ ] **T001** [Setup] [P1] [Blocks: T010+] Verify `collections.deque` is available in Python 3.11 standard library (for circular window buffer)
+- [x] **T001** [Setup] [P1] [Blocks: T010+] Verify `collections.deque` is available in Python 3.11 standard library (for circular window buffer)
 
-- [ ] **T002** [Setup] [P1] [Blocks: T010+] Verify `asyncio.Queue` is available (for inter-filter communication)
+- [x] **T002** [Setup] [P1] [Blocks: T010+] Verify `asyncio.Queue` is available (for inter-filter communication)
 
-- [ ] **T003** [Setup] [P1] [Blocks: T010+] Create directory `backend/tests/unit/` if not present
+- [x] **T003** [Setup] [P1] [Blocks: T010+] Create directory `backend/tests/unit/` if not present
 
-- [ ] **T004** [Setup] [P1] [Blocks: T010+] Create directory `backend/tests/integration/` if not present
+- [x] **T004** [Setup] [P1] [Blocks: T010+] Create directory `backend/tests/integration/` if not present
 
-- [ ] **T005** [Setup] [P1] [Blocks: T010+] Verify PostgreSQL is running and seeded: `uv run python scripts/seed.py --reset`
+- [x] **T005** [Setup] [P1] [Blocks: T010+] Verify PostgreSQL is running and seeded: `uv run python scripts/seed.py --reset`
 
-**Checkpoint**: Dependencies verified, directories created, database ready.
+**Checkpoint**: Dependencies verified, directories created, database ready. ✓ COMPLETE
 
 ---
 
@@ -39,58 +39,44 @@
 
 **⚠️ CRITICAL**: No filter implementation can begin until this phase is complete.
 
-- [ ] **T010** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+] 
+- [x] **T010** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+] 
   **Define ScanData class** in `backend/app/analytics/pipeline.py`:
-  - Fields: `sku: str`, `scan_id: int`, `scan_count: int = 0`
-  - Make dataclass with frozen=True for queue safety
-  - Add docstring: "Represents a single scan event from transaction"
+  - Fields: `sku: str`, `scan_id: int`
+  - Made dataclass with frozen=True for queue safety ✓
 
-- [ ] **T011** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
+- [x] **T011** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
   **Define WindowData class** in `backend/app/analytics/pipeline.py`:
   - Fields: `window_start: int`, `window_end: int`, `scans: list[ScanData]`, `slide_count: int = 0`
-  - Make dataclass with frozen=True
-  - Add docstring: "Represents current 1000-scan window with metadata"
+  - Made dataclass with frozen=True ✓
 
-- [ ] **T012** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
+- [x] **T012** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
   **Define AggregatedData class** in `backend/app/analytics/pipeline.py`:
   - Fields: `sku: str`, `scan_count: int`
-  - Make dataclass with frozen=True
-  - Add docstring: "Aggregated scan count for one SKU in current window"
+  - Made dataclass with frozen=True ✓
 
-- [ ] **T013** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
+- [x] **T013** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
   **Define RankedData class** in `backend/app/analytics/pipeline.py`:
-  - Fields: `window_size: int`, `slide_interval: int`, `window_start: int`, `window_end: int`, `computed_at: datetime`, `ranking: list[dict[str, Any]]`
-  - Make dataclass with frozen=True
-  - Add docstring: "Final ranked items ready for database persistence"
+  - Fields: `window_size`, `slide_interval`, `window_start`, `window_end`, `computed_at`, `ranking`
+  - Made dataclass with frozen=True ✓
 
-- [ ] **T014** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
-  **Create TERMINATE sentinel** in `backend/app/analytics/pipeline.py`:
-  ```python
-  TERMINATE = object()  # Sentinel for pipeline shutdown
-  ```
+- [x] **T014** [Foundational] [P1] [Depends: T001-T005] [Blocks: T020+]
+  **Create TERMINATE sentinel** in `backend/app/analytics/pipeline.py`: ✓
 
-- [ ] **T015** [Foundational] [P1] [Depends: T010-T014] [Blocks: T020+]
-  **Create logger** in `backend/app/analytics/pipeline.py`:
-  ```python
-  import logging
-  log = logging.getLogger("checkout")
-  ```
+- [x] **T015** [Foundational] [P1] [Depends: T010-T014] [Blocks: T020+]
+  **Create logger** in `backend/app/analytics/pipeline.py`: ✓
 
-- [ ] **T016** [Foundational] [P1] [Depends: T010-T014] [Blocks: T020+]
+- [x] **T016** [Foundational] [P1] [Depends: T010-T014] [Blocks: T020+]
   **Create constants** in `backend/app/analytics/pipeline.py`:
-  ```python
-  WINDOW_SIZE = 1000
-  SLIDE_INTERVAL = 500
-  RANKING_DEPTH = 200
-  ```
+  - WINDOW_SIZE = 1000, SLIDE_INTERVAL = 500, RANKING_DEPTH = 200 ✓
 
-- [ ] **T017** [Foundational] [P1] [Depends: T010-T016] [Blocks: T020+]
-  **Create run_streaming() orchestrator function stub** in `backend/app/analytics/pipeline.py`:
-  - Signature: `async def run_streaming(session: AsyncSession) -> None:`
-  - Body: placeholder with docstring
-  - Blocks: will be populated in Phase 3
+- [x] **T017** [Foundational] [P1] [Depends: T010-T016] [Blocks: T020+]
+  **Create run_streaming() orchestrator function** in `backend/app/analytics/pipeline.py`:
+  - Full implementation with asyncio.gather() for concurrent filters ✓
 
-**Checkpoint**: Data model complete, pipeline ready for filter implementation.
+- [x] **T018** [Foundational] [P1] [Depends: T017] [Blocks: T020+]
+  **Added WindowMetadata dataclass** for window bound propagation through pipeline ✓
+
+**Checkpoint**: Data model complete, pipeline ready for filter implementation. ✓ COMPLETE
 
 ---
 
