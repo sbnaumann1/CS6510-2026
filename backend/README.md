@@ -1,9 +1,10 @@
-# Self-Checkout Backend — Layered (FastAPI + PostgreSQL)
+# Self-Checkout Backend — Pipelined Analytics (FastAPI + PostgreSQL)
 
-Week 2 of the architecture series. Implements the frozen contract in
+Week 3 of the architecture series. Implements the frozen contract in
 [`spec.yaml`](./spec.yaml) as a single FastAPI service over one PostgreSQL
 instance, measured by the unmodified Java load client in `../load-client/`.
-Inside that one service, the code is split into four layers:
+Inside that one service, the code is split into four layers, with Week 3
+introducing a **pipelined architecture for popular items analytics**:
 
 | Layer | Package | Owns |
 | --- | --- | --- |
@@ -19,7 +20,14 @@ Week 1 was the same service without these boundaries: business logic and SQL wer
 in `app/services/`.
 
 Design artifacts:
-- Week 2 (this layering): [`specs/002-layered-architecture/`](./specs/002-layered-architecture/):
+- Week 3 (this pipelined analytics): [`specs/003-pipelined-analytics/`](./specs/003-pipelined-analytics/):
+  [spec](./specs/003-pipelined-analytics/spec.md) ·
+  [plan](./specs/003-pipelined-analytics/plan.md) ·
+  [research](./specs/003-pipelined-analytics/research.md) ·
+  [data model](./specs/003-pipelined-analytics/data-model.md) ·
+  [quickstart](./specs/003-pipelined-analytics/quickstart.md) ·
+  [tasks](./specs/003-pipelined-analytics/tasks.md)
+- Week 2 (layering): [`specs/002-layered-architecture/`](./specs/002-layered-architecture/):
   [spec](./specs/002-layered-architecture/spec.md) ·
   [plan](./specs/002-layered-architecture/plan.md) ·
   [research](./specs/002-layered-architecture/research.md) ·
@@ -209,7 +217,7 @@ psql -d checkout -tAc "SELECT sum(initial_stock - current_stock) FROM inventory_
 | Never oversell | The conditional `UPDATE` is the mechanism; the `CHECK (current_stock >= 0)` is a backstop that should never fire | `db/transactions_repo.py` `decrement_stock` |
 | No deadlocks | Every completion takes stock locks in the same SKU order, so a lock cycle cannot form | `db/transactions_repo.py` `lock_stock` |
 | Low-stock alerts | Written inside the completion transaction, only on a threshold crossing — one row per descent, committed atomically with the decrement. `GET /inventory/low-stock` reads them back | write: `transactions/alerts.py`; read: `analytics/low_stock.py` |
-| Popular items | `transaction_item.id` is the global scan sequence; a hopping window is recomputed out of band every 500 scans into one snapshot row, so all workers agree | `analytics/popular_items.py`, `analytics/scheduler.py` |
+| Popular items | `transaction_item.id` is the global scan sequence; a hopping window is recomputed out of band every 500 scans via a **4-stage pipeline** (ingest → aggregate → rank → output). Filters run concurrently via asyncio queues, then all workers read the same snapshot | `analytics/pipeline.py` (IngestFilter, AggregationFilter, RankingFilter, OutputFilter), `analytics/scheduler.py`, `analytics/popular_items.py` (read-path) |
 | Money | Integer cents end to end; converted to the contract's `number` once, at the JSON boundary | `money.py` (shared) |
 
 ## Expected results
@@ -229,8 +237,10 @@ app/                   four layers; see specs/002-layered-architecture/contracts
   api/               API layer: routes + request parsing (_request.py); no SQL
   transactions/      Transactions layer: lifecycle + completion invariant (service.py),
                      low-stock alert emission (alerts.py), abandoned-tx sweeper (sweeper.py)
-  analytics/         Analytics layer: popular-items window (popular_items.py),
-                     low-stock report (low_stock.py), recompute trigger (scheduler.py)
+  analytics/         Analytics layer: pipelined popular-items computation (pipeline.py:
+                     IngestFilter, AggregationFilter, RankingFilter, OutputFilter),
+                     read-path for rankings (popular_items.py), low-stock report (low_stock.py),
+                     recompute scheduling (scheduler.py)
   db/                Database access layer: engine/session/advisory lock (__init__.py),
                      all SQL in transactions_repo.py and analytics_repo.py
   main.py            app factory, lifespan, sweeper loop
