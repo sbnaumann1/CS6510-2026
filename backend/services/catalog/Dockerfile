@@ -1,0 +1,25 @@
+# Catalog Service image (specs/005-service-architecture/research.md R3).
+# Build context: backend/. Copies only this service's directory plus the shared
+# libraries, so a change in another service never invalidates these layers.
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SERVICE_NAME=catalog WORKERS=1
+WORKDIR /srv
+
+# Third-party dependencies, pinned from the workspace uv.lock (cached layer).
+COPY services/catalog/requirements.lock /tmp/req.lock
+RUN pip install --no-cache-dir -r /tmp/req.lock
+
+# The shared libraries: the deliberate coupling point, distributed into every image.
+COPY packages/checkout_data /tmp/packages/checkout_data
+COPY packages/checkout_web /tmp/packages/checkout_web
+RUN pip install --no-cache-dir --no-deps /tmp/packages/checkout_data /tmp/packages/checkout_web
+
+# This service only.
+COPY services/catalog /tmp/svc
+RUN pip install --no-cache-dir --no-deps /tmp/svc && rm -rf /tmp/packages /tmp/svc /tmp/req.lock
+
+EXPOSE 8000
+# Shell form on purpose, so ${WORKERS} expands. --http h11: research R10.
+CMD exec uvicorn catalog_service.main:app --host 0.0.0.0 --port 8000 \
+    --workers ${WORKERS} --loop uvloop --http h11 --no-access-log --log-level warning

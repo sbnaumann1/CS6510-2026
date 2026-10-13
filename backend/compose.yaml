@@ -1,0 +1,175 @@
+# Spec 005: four domain services + gateway over one centralized PostgreSQL.
+# Topology contract: specs/005-service-architecture/contracts/compose-topology.md
+#
+#   docker compose up -d --build --wait     # build, seed an empty DB, start, block until healthy
+#   docker compose down -v                  # tear down, including database data
+#
+# Domain services depend only on `seed` (never on each other), and are given only
+# DATABASE_URL plus tuning values — never another service's address (boundary rule 6).
+
+x-service-healthcheck: &service-healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+  interval: 2s
+  timeout: 3s
+  retries: 30
+  start_period: 5s
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-checkout}
+      POSTGRES_USER: checkout
+      POSTGRES_PASSWORD: checkout
+    # Tuning carried over from 001 research R11; shared_buffers sized for the VM (005 R8).
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - max_connections=200
+      - -c
+      - synchronous_commit=off
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_wal_size=8GB
+    shm_size: 256mb
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # TCP on purpose: during first-time init the server listens on its socket only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U checkout -d ${POSTGRES_DB:-checkout}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  seed:
+    build:
+      context: .
+      dockerfile: packages/checkout_data/Dockerfile
+    image: checkout-tools
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      CATALOG_SIZE: ${CATALOG_SIZE:-2000}
+      STOCK_PER_ITEM: ${STOCK_PER_ITEM:-10000}
+      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  catalog:
+    build:
+      context: .
+      dockerfile: services/catalog/Dockerfile
+    image: checkout-catalog
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      WORKERS: "2"
+      DB_POOL_SIZE: "2"
+    ports:
+      - "127.0.0.1:8081:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck: *service-healthcheck
+
+  checkout:
+    build:
+      context: .
+      dockerfile: services/checkout/Dockerfile
+    image: checkout-checkout
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      WORKERS: "6"
+      DB_POOL_SIZE: "10"
+      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
+      TX_ABANDON_MINUTES: ${TX_ABANDON_MINUTES:-5}
+    ports:
+      - "127.0.0.1:8082:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck: *service-healthcheck
+
+  inventory:
+    build:
+      context: .
+      dockerfile: services/inventory/Dockerfile
+    image: checkout-inventory
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      WORKERS: "1"
+      DB_POOL_SIZE: "4"
+      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
+    ports:
+      - "127.0.0.1:8083:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck: *service-healthcheck
+
+  analytics:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile
+    image: checkout-analytics
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      WORKERS: "1"
+      DB_POOL_SIZE: "4"
+      POPULAR_WINDOW_SIZE: "1000"
+      POPULAR_SLIDE_INTERVAL: "500"
+      POPULAR_POLL_MS: "100"
+      POPULAR_GAP_GRACE_MS: "1000"
+    ports:
+      - "127.0.0.1:8084:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck: *service-healthcheck
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    image: checkout-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      catalog:
+        condition: service_healthy
+      checkout:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
+      analytics:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/gateway/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # On-demand CLIs: docker compose run --rm tools python -m checkout_data.verify_invariant
+  tools:
+    image: checkout-tools
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      CATALOG_SIZE: ${CATALOG_SIZE:-2000}
+      STOCK_PER_ITEM: ${STOCK_PER_ITEM:-10000}
+      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

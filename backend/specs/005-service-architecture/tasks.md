@@ -180,7 +180,7 @@ description: "Task list for 005 service-based architecture"
 
 ### Containers and gateway
 
-- [ ] T032 [P] [US1] Create `gateway/nginx.conf` implementing [contracts/gateway-routes.md](./contracts/gateway-routes.md):
+- [X] T032 [P] [US1] Create `gateway/nginx.conf` implementing [contracts/gateway-routes.md](./contracts/gateway-routes.md):
   - **Top level**: `worker_processes auto;` and `events { worker_connections 4096; }`.
   - **In `http`**:
     - `access_log off;` and `resolver 127.0.0.11 valid=5s ipv6=off;`
@@ -198,19 +198,19 @@ description: "Task list for 005 service-based architecture"
     - `proxy_intercept_errors off;`
     - `error_page 502 503 504 = @<svc>_down;`
   - **Named location per service**: `location @<svc>_down { default_type application/json; return 503 '{"error":"INTERNAL_ERROR","message":"<svc> service is unavailable."}'; }`
-- [ ] T033 [P] [US1] Create `gateway/Dockerfile`: `FROM nginx:1.27-alpine`, `COPY gateway/nginx.conf /etc/nginx/nginx.conf`, `EXPOSE 8080`. The build context is `backend/`.
-- [ ] T034 [P] [US1] Create `tests/unit/test_gateway_routes.py`:
+- [X] T033 [P] [US1] Create `gateway/Dockerfile`: `FROM nginx:1.27-alpine`, `COPY gateway/nginx.conf /etc/nginx/nginx.conf`, `EXPOSE 8080`. The build context is `backend/`.
+- [X] T034 [P] [US1] Create `tests/unit/test_gateway_routes.py`:
   - Parse `gateway/nginx.conf` with a regex over `location (=\s*)?(\S+)\s*\{` blocks and their `proxy_pass http://(\w+)`, skipping `@` named locations and `/gateway/healthz`.
   - Assert the resulting set of (kind, path, upstream) equals `tests._dispatch.ROUTES`.
   - Assert `route("/transactions/tx-1/items") == "checkout"`, `route("/items") == "catalog"` and `route("/nope") == "checkout"`.
   
   Depends on T029, T032.
-- [ ] T035 [US1] Create `scripts/lock_services.sh` (executable, `set -euo pipefail`, `cd` to backend):
+- [X] T035 [US1] Create `scripts/lock_services.sh` (executable, `set -euo pipefail`, `cd` to backend):
   - For each `svc` in catalog, checkout, inventory and analytics, run `uv export --frozen --no-dev --no-emit-workspace --no-hashes --package ${svc}-service -o services/${svc}/requirements.lock`.
   - Also run `uv export … --package checkout-data -o packages/checkout_data/requirements.lock`.
   
   Run it and commit the five lock files.
-- [ ] T036 [P] [US1] Create `services/catalog/Dockerfile`, `services/checkout/Dockerfile`, `services/inventory/Dockerfile` and `services/analytics/Dockerfile`, each with build context `backend/`:
+- [X] T036 [P] [US1] Create `services/catalog/Dockerfile`, `services/checkout/Dockerfile`, `services/inventory/Dockerfile` and `services/analytics/Dockerfile`, each with build context `backend/`:
   ```dockerfile
   FROM python:3.11-slim
   ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 SERVICE_NAME=<svc> WORKERS=1
@@ -225,8 +225,8 @@ description: "Task list for 005 service-based architecture"
   CMD uvicorn <svc>_service.main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS} --loop uvloop --http h11 --no-access-log --log-level warning
   ```
   Each file copies only its own `services/<svc>/` (research R3), and the shell-form `CMD` is deliberate, so `${WORKERS}` expands. Depends on T035.
-- [ ] T037 [P] [US1] Create `packages/checkout_data/Dockerfile` (the `checkout-tools` image): the same pattern, installing `packages/checkout_data/requirements.lock` and then `checkout_data` only, with `CMD ["python", "-m", "checkout_data.seed", "--if-empty"]`. Depends on T035.
-- [ ] T038 [US1] Create `compose.yaml` per [contracts/compose-topology.md](./contracts/compose-topology.md), and delete `docker-compose.yml`. Every value is in that contract and in data-model.md §4.
+- [X] T037 [P] [US1] Create `packages/checkout_data/Dockerfile` (the `checkout-tools` image): the same pattern, installing `packages/checkout_data/requirements.lock` and then `checkout_data` only, with `CMD ["python", "-m", "checkout_data.seed", "--if-empty"]`. Depends on T035.
+- [X] T038 [US1] Create `compose.yaml` per [contracts/compose-topology.md](./contracts/compose-topology.md), and delete `docker-compose.yml`. Every value is in that contract and in data-model.md §4.
   - **`postgres`**:
     - `postgres:17`, env `POSTGRES_DB: ${POSTGRES_DB:-checkout}`, `POSTGRES_USER: checkout` and `POSTGRES_PASSWORD: checkout`.
     - `command` flags `shared_buffers=1GB`, `work_mem=32MB`, `max_connections=200`, `synchronous_commit=off`, `wal_compression=on`, `checkpoint_timeout=15min` and `max_wal_size=8GB`.
@@ -245,15 +245,15 @@ description: "Task list for 005 service-based architecture"
   - **Rule**: no service's `environment` names another service's host (boundary rule 6).
   
   Depends on T033, T036, T037.
-- [ ] T039 [US1] Create `compose.test.yaml`, an override that sets `POSTGRES_DB=checkout_test`, `CATALOG_SIZE=50` and `STOCK_PER_ITEM=100` through the same variables, so `docker compose -f compose.yaml -f compose.test.yaml up -d --build --wait` yields a test stack whose DB is reachable at `127.0.0.1:5433/checkout_test`. Depends on T038.
-- [ ] T040 [US1] Validate quickstart **V1, V2 and V3** with Docker Desktop running. Fix until:
+- [X] T039 [US1] Create `compose.test.yaml`, an override that sets `POSTGRES_DB=checkout_test`, `CATALOG_SIZE=50` and `STOCK_PER_ITEM=100` through the same variables, so `docker compose -f compose.yaml -f compose.test.yaml up -d --build --wait` yields a test stack whose DB is reachable at `127.0.0.1:5433/checkout_test`. Depends on T038.
+- [X] T040 [US1] Validate quickstart **V1, V2 and V3** with Docker Desktop running. Fix until:
   - `docker compose up -d --build --wait` exits 0, every long-running unit is healthy, and `seed` exited 0;
   - `curl localhost:8080/items` returns the catalog;
   - `uv run pytest -q` is green;
   - the gateway-mode contract run (`GATEWAY_URL=… TEST_DATABASE_URL=… uv run pytest -q tests/contract`) is green.
   
   Depends on T031, T034, T038, T039.
-- [ ] T041 [US1] Smoke-run the load client: `docker compose down -v && docker compose up -d --build --wait`, then `cd ../load-client && ./build.sh && ./run.sh --duration=20`, then `docker compose run --rm tools python -m checkout_data.verify_invariant`. Expect the invariant to PASS, and no `INTERNAL_ERROR` or timeouts. Don't commit this report. Depends on T040.
+- [X] T041 [US1] Smoke-run the load client: `docker compose down -v && docker compose up -d --build --wait`, then `cd ../load-client && ./build.sh && ./run.sh --duration=20`, then `docker compose run --rm tools python -m checkout_data.verify_invariant`. Expect the invariant to PASS, and no `INTERNAL_ERROR` or timeouts. Don't commit this report. Depends on T040.
 
 **Checkpoint**: the MVP is live. The whole contract works through four separately containerized services behind the gateway.
 

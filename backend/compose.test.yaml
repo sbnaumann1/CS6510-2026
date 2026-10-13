@@ -1,0 +1,43 @@
+# Test-stack override (005 research R11): a `checkout_test` database with the
+# small catalog the test suite expects, reachable from the host at
+# 127.0.0.1:5433/checkout_test for the suite's reset fixture.
+#
+#   docker compose -f compose.yaml -f compose.test.yaml up -d --build --wait
+#   GATEWAY_URL=http://localhost:8080 \
+#   TEST_DATABASE_URL=postgresql+asyncpg://checkout:checkout@127.0.0.1:5433/checkout_test \
+#     uv run pytest -q tests/contract
+#
+# Values are interpolated into compose.yaml through the same variables; the
+# defaults below apply only when this file is included.
+# A separate project name keeps the test stack's containers and volume apart
+# from the measured stack's. The two cannot run at once (both bind :8080).
+name: checkout-test
+
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: checkout_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U checkout -d checkout_test"]
+  seed:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
+      CATALOG_SIZE: "50"
+      STOCK_PER_ITEM: "100"
+  catalog:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
+  checkout:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
+  inventory:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
+  analytics:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
+  tools:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
+      CATALOG_SIZE: "50"
+      STOCK_PER_ITEM: "100"

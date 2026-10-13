@@ -1,0 +1,16 @@
+async-timeout==5.0.1 ; python_full_version < '3.12'
+    # via asyncpg
+asyncpg==0.29.0
+    # via checkout-data
+greenlet==3.5.6
+    # via
+    #   checkout-data
+    #   sqlalchemy
+psycopg2-binary==2.9.9
+    # via checkout-data
+python-dotenv==1.0.0
+    # via checkout-data
+sqlalchemy==2.0.23
+    # via checkout-data
+typing-extensions==4.16.0
+    # via sqlalchemy

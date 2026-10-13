@@ -1,0 +1,13 @@
+# Build context is backend/; images copy only packages/ and services/<name>/.
+.venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+tests/
+specs/
+logs/
+.specify/
+.claude/
+*.log
+.env
+.env.*

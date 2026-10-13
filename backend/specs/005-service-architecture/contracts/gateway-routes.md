@@ -22,6 +22,10 @@ both and fails if they differ.
 | `= /gateway/healthz` | gateway liveness (not in the contract) | answered by nginx: `200 {"status":"ok","service":"gateway"}` |
 | `/` (default) | any other path | `checkout:8000`, so unknown paths get the same FastAPI 404 `ApiError` body as before |
 
+Services' own `GET /healthz` is not given a route. A request for `:8080/healthz` falls
+through the default location to Checkout's health endpoint. That is harmless (no data, not in
+the contract), and it's left that way rather than adding a gateway-only special case.
+
 `/transactions/{id}/items` must go to **checkout**, not catalog. The exact-match `= /items`
 guarantees that, and the route-parity test checks it.
 
