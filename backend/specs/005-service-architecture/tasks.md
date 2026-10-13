@@ -425,12 +425,12 @@ description: "Task list for 005 service-based architecture"
   
   Remove the `lsof`/`SERVER_PID`/`run_server.sh` logic, and update the trailing "manual equivalent" comment to the compose commands. **Leave the stack running after the last run** and print `stack left up for review; tear down with: docker compose down -v`. T067 queries the stress database and logs.
 - [X] T063 [US4] Manual step: set Docker Desktop to ≥ 8 CPUs / ≥ 8 GB, confirm with `docker info --format '{{.NCPU}} {{.MemTotal}}'`, and write the values into a `<!-- docker-resources: … -->` placeholder line in `../load-client/reports/README.md`. T065 expands it.
-- [ ] T064 [US4] Run `./scripts/run_load_tests.sh all`. Accept the runs only if both of these hold:
+- [X] T064 [US4] Run `./scripts/run_load_tests.sh all`. Accept the runs only if both of these hold:
   - the invariant PASSes after each;
   - neither report has errors other than COMPLETE 409 `INSUFFICIENT_STOCK`. Check `operations[*].errorCount` and `logs/compose-*.log` for `INTERNAL_ERROR` or tracebacks.
   
   If either fails, fix the cause and re-run both. Keep both reports, and delete superseded attempts from the 005 folder. Depends on T061, T062, T063.
-- [ ] T065 [P] [US4] Add a "Week 5 — Domain services (compose)" section to `../load-client/reports/README.md` with:
+- [X] T065 [P] [US4] Add a "Week 5 — Domain services (compose)" section to `../load-client/reports/README.md` with:
   - the host;
   - the Docker Desktop CPU/memory from T063;
   - the per-service WORKERS/pool values;
@@ -439,7 +439,7 @@ description: "Task list for 005 service-based architecture"
   - a short paragraph explaining any gap, citing the gateway hop and Docker Desktop port forwarding (research R9).
   
   Depends on T064.
-- [ ] T066 [US4] Rewrite `README.md` for Week 5:
+- [X] T066 [US4] Rewrite `README.md` for Week 5:
   - **Title and intro**: services-based architecture.
   - **Services defined**: a table of the four domain services with responsibility, owned endpoints and background work (from the spec Overview), plus gateway, postgres and seed/tools listed as infrastructure.
   - **Shared database access**: how it's packaged and distributed (`checkout-data` 0.5.0 with per-service repo modules and the ownership registry; `checkout-web`; each image installs both), linking contracts/service-boundaries.md and data-model.md §1.

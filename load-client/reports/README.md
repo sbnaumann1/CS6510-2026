@@ -64,6 +64,64 @@ Two things to keep in mind when comparing these numbers:
   SKUs, so 100 stations queue behind each other. Compare it against a Week 1 stress run at
   2 000 000 stock if one is made, not against V8.
 
+## Week 5 — Domain services under Docker Compose, 2026-10-13
+
+These are the graded reports for spec 005, in [`005-service-architecture/`](./005-service-architecture/).
+Four domain services (Catalog, Checkout, Inventory, Analytics) run behind an nginx gateway on
+`:8080`, all over one PostgreSQL 17 container.
+
+**Setup**
+- Host: Apple Silicon, 11 cores / 18 GB.
+- Docker Desktop: Docker 29.8.2, Compose v5.6.0, with 11 CPUs and 13.1 GiB allocated (at least the 8 CPU / 8 GB the plan requires).
+- Services (WORKERS / DB_POOL_SIZE):
+
+  | Service | WORKERS | DB_POOL_SIZE |
+  | --- | --- | --- |
+  | checkout | 6 | 10 |
+  | catalog | 2 | 2 |
+  | inventory | 1 | 4 |
+  | analytics | 1 | 4 |
+
+  Analytics runs one persistent pipeline.
+- Each run used a fresh stack (`docker compose down -v`, then `up --wait`) and the assignment's exact client flags.
+- Produced by `backend/scripts/run_load_tests.sh all`.
+
+| Report | Scenario | Config | tx/s | items/s | COMPLETE err% | Invariant |
+| --- | --- | --- | --- | --- | --- | --- |
+| `005-service-architecture/report-20261013-093301.json` | **Default parameters** (`./run.sh`) | 10 stations / 60 s, stock 10 000 | 220.6 | 4 250 | 45.4 % | PASS |
+| `005-service-architecture/report-20261013-093519.json` | **Stress** (`--stations=100 --duration=120`) | 100 stations / 120 s, stock 10 000 | 190.9 | 5 242 | 61.7 % | PASS |
+| *Week 4 baseline* `report-20261002-163856.json` | default, native processes | 10 stations / 60 s | 320.9 | 7 562 | — | PASS |
+| *Week 4 baseline* `report-20261002-164059.json` | stress, native processes | 100 stations / 120 s | 269.1 | 9 078 | — | PASS |
+
+**Errors.** Every error in both runs is a contract-defined `409 INSUFFICIENT_STOCK` at COMPLETE:
+47 959 of them, once the hot SKUs sell out. That is the same behaviour as in V6/V8 above. There
+were no `5xx` responses, timeouts or tracebacks.
+
+**Throughput is 69 % (default) and 71 % (stress) of Week 4.** The architecture adds hops,
+and the client is closed-loop: each station waits for each response. So any fixed per-request
+cost lowers transactions per second directly. Measured mean latency per scan:
+- Week 4, native: 0.98 ms.
+- Week 5: 1.83 ms. That is about +0.85 ms per request, on every request.
+
+A diagnostic A/B (30 s each, 10 stations, stock 200 000 so nothing depletes; not committed)
+splits it up:
+
+| Path | tx/s | SCAN mean |
+| --- | --- | --- |
+| Host → Docker Desktop port forwarding → gateway | 420.6 | 1.74 ms |
+| Load client inside the compose network → gateway | 470.5 | 1.54 ms |
+
+So about **0.2 ms** is Docker Desktop's host→VM port forwarding. The remaining **~0.55 ms** is:
+- the gateway hop (one more proxied HTTP request), plus
+- the services reaching PostgreSQL over TCP inside the VM. Week 4 used a Unix socket on the host.
+
+The stress run's COMPLETE tail (p95 225 ms vs 64 ms in Week 4) is where that slower database
+path shows most: 100 stations queue on the same hot-SKU row locks, and each lock is now held
+for longer. The levers that would close the gap are listed in
+`backend/specs/005-service-architecture/research.md` R8–R10: sharing the PostgreSQL Unix socket
+into the containers, uvicorn's `httptools` parser behind the gateway, and running the client
+inside the network. None of them was applied to the graded runs.
+
 ## Earlier reports
 
 `report-20260824-*.json` and `report-20260916-185335.json` predate the backend and were produced

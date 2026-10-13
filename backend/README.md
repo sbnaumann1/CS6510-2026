@@ -1,190 +1,193 @@
-# Self-Checkout Backend — Pipelined Analytics (FastAPI + PostgreSQL)
+# Self-Checkout Backend — Domain Services over a Shared Database
 
-Week 3 of the architecture series. Implements the frozen contract in
-[`spec.yaml`](./spec.yaml) as a single FastAPI service over one PostgreSQL
-instance, measured by the unmodified Java load client in `../load-client/`.
-Inside that one service, the code is split into four layers, with Week 3
-introducing a **pipelined architecture for popular items analytics**:
+Week 5 of the architecture series. The frozen contract in [`spec.yaml`](./spec.yaml) is now
+served by **four independently deployable domain services**, organized by business
+function. They all use **one centralized PostgreSQL database** and never call each other.
+An nginx **gateway** on `:8080` routes each request by path, so the unmodified Java load
+client in `../load-client/` still sees one base URL.
 
-| Layer | Package | Owns |
-| --- | --- | --- |
-| API | `app/api/` | HTTP routes, request parsing, response shaping. No SQL. |
-| Transactions | `app/transactions/` | Start / scan / complete / get, the locked completion sequence, low-stock alert emission (write side), abandoned-transaction sweep |
-| Analytics | `app/analytics/` | Popular-items window (compute, schedule, read), low-stock report (read side) |
-| Database access | `app/db/` | Every SQL statement, as named repository functions. Never commits or rolls back; the business layers own transaction boundaries. |
+## Services defined
 
-Transactions and Analytics never import each other. They only share data through the database.
-The API/DB boundary rules, and the greps that check them, are in
-[`layer-boundaries.md`](./specs/002-layered-architecture/contracts/layer-boundaries.md).
-Week 1 was the same service without these boundaries: business logic and SQL were mixed together
-in `app/services/`.
+| Service | Business function | Endpoints it owns | Background work it owns |
+| --- | --- | --- | --- |
+| **Catalog Service** | What can be sold, and at what price | `GET /items` | — |
+| **Checkout Service** | Running a basket from start to payment | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | Abandoned-transaction sweep; low-stock alert emission, inside the completion transaction |
+| **Inventory Service** | Reporting stock that needs attention | `GET /inventory/low-stock` | — |
+| **Analytics Service** | Understanding buying behaviour | `GET /analytics/popular-items` | The persistent popular-items streaming pipeline |
 
-Design artifacts:
-- Week 3 (this pipelined analytics): [`specs/003-pipelined-analytics/`](./specs/003-pipelined-analytics/):
-  [spec](./specs/003-pipelined-analytics/spec.md) ·
-  [plan](./specs/003-pipelined-analytics/plan.md) ·
-  [research](./specs/003-pipelined-analytics/research.md) ·
-  [data model](./specs/003-pipelined-analytics/data-model.md) ·
-  [quickstart](./specs/003-pipelined-analytics/quickstart.md) ·
-  [tasks](./specs/003-pipelined-analytics/tasks.md)
-- Week 2 (layering): [`specs/002-layered-architecture/`](./specs/002-layered-architecture/):
-  [spec](./specs/002-layered-architecture/spec.md) ·
-  [plan](./specs/002-layered-architecture/plan.md) ·
-  [research](./specs/002-layered-architecture/research.md) ·
-  [data model](./specs/002-layered-architecture/data-model.md) ·
-  [quickstart](./specs/002-layered-architecture/quickstart.md)
-- Week 1 (behavior, schema, contract; still authoritative): [`specs/001-checkout-backend/`](./specs/001-checkout-backend/):
-  [spec](./specs/001-checkout-backend/spec.md) ·
-  [plan](./specs/001-checkout-backend/plan.md) ·
-  [research](./specs/001-checkout-backend/research.md) ·
-  [data model](./specs/001-checkout-backend/data-model.md) ·
-  [quickstart](./specs/001-checkout-backend/quickstart.md)
+Infrastructure, not domain services:
+- **gateway** (nginx; routing only)
+- **postgres** (the one shared database)
+- **seed** and **tools** (one-shot operator CLIs)
+
+Each domain service is its own deployable unit:
+- its own Python package (`services/<name>/`);
+- its own pinned dependency file (`requirements.lock`);
+- its own image (`services/<name>/Dockerfile`);
+- its own compose entry.
+
+It can be built, started, stopped or restarted alone, and when it's down only its own
+routes fail. Those failures come back as a `503` in the contract's error shape.
+
+## How the services share the database (and nothing else)
+
+The services' only coupling is the database, and the code for it is packaged deliberately:
+
+- **`checkout-data` 0.5.0** ([`packages/checkout_data/`](./packages/checkout_data/)) is the shared data-access library. It holds:
+  - the schema (ORM models);
+  - connection and session handling, and the advisory-lock helpers;
+  - the seed and invariant CLIs;
+  - **one repository module per consuming service**: `repos/catalog.py` (read-only, shared), `repos/checkout.py`, `repos/inventory.py` and `repos/analytics.py`. Every SQL statement in the system lives in one of these.
+- **`checkout_data.ownership.TABLES`** declares, for every table, its single writing owner and its readers:
+
+  | Table | Owner | Readers |
+  | --- | --- | --- |
+  | `catalog_item` | catalog (seed only) | all four |
+  | `inventory_stock` | checkout | checkout, inventory |
+  | `transaction` | checkout | checkout |
+  | `transaction_item` | checkout | checkout, analytics |
+  | `low_stock_alert` | checkout | inventory |
+  | `popular_window_snapshot` | analytics | analytics |
+- **`checkout-web` 0.5.0** ([`packages/checkout_web/`](./packages/checkout_web/)) carries the contract's error shape, request parsing, the app factory and `/healthz`. It has no database access.
+- **Each image installs both libraries as regular packages**, so the shared code is distributed into every deployable unit. A schema change means bumping `checkout-data` and redeploying the services in that table's Readers column. That coupling is accepted and visible, not hidden.
+
+Where one business function needs another's data, it reads the shared database:
+- Checkout prices scans from `catalog_item`; it doesn't call Catalog.
+- Inventory reports from the stock and alert rows that Checkout writes.
+- Analytics tails the scan record Checkout writes. Nothing tells it a scan happened.
+
+[`scripts/check_boundaries.py`](./scripts/check_boundaries.py) enforces all of this as part of
+the test suite. It fails on:
+- a service importing another service's code;
+- any network client in a service;
+- SQL outside `checkout_data`;
+- a repository writing a table it doesn't own, or reading one it isn't a declared reader of;
+- a compose environment naming another service's host.
+
+Contract: [`specs/005-service-architecture/contracts/service-boundaries.md`](./specs/005-service-architecture/contracts/service-boundaries.md).
+
+## Analytics: one persistent streaming pipeline
+
+```text
+TailIngest ─q1─▶ WindowFilter ─q2─▶ AggregationFilter ─q3─▶ RankingFilter ─slot─▶ OutputFilter
+ (DB tail)       (slide by id)      (running counts)        (top-200)              (latest-wins, commit)
+```
+
+The Analytics Service runs one pipeline for its whole life. There is no new run per 500
+scans.
+- **TailIngest** follows `transaction_item` as rows commit. It keeps a contiguous watermark, so scans that commit out of order are never skipped, and an id that never commits is skipped after 1 s.
+- **WindowFilter** slides the 1 000-scan window by scan id every 500.
+- **AggregationFilter** keeps a running per-SKU count.
+- **RankingFilter** breaks ties by SKU.
+- **OutputFilter** commits each window. If several are ready at once, it writes only the newest.
+- **A supervisor** holds a PostgreSQL advisory lock, so only one pipeline runs across replicas. It rebuilds the window from the database on start, so a restarted Analytics catches up on scans made while it was down.
+
+Design: [research R5–R6](./specs/005-service-architecture/research.md) and
+[data-model §3](./specs/005-service-architecture/data-model.md).
 
 ## Prerequisites
 
-- Python 3.11 + [`uv`](https://docs.astral.sh/uv/)
-- PostgreSQL 17 (`brew install postgresql@17`), tuned per research R11
-- JDK 21+ for the load client
-
-## Setup
-
-```bash
-brew services start postgresql@17
-createdb checkout
-
-uv sync
-cp .env.example .env                       # edit DATABASE_URL if not on the Unix socket
-uv run python scripts/seed.py --reset      # schema + 2000 items @ 10000 units each
-```
-
-`--reset` is idempotent and **must be re-run before every measured load run** — a
-run started against depleted stock is not comparable to anything.
+- **Docker Desktop**, running, with ≥ 8 CPUs and ≥ 8 GB memory (Settings → Resources), and Compose v2 (`docker compose version`).
+- **JDK 21+** for the load client.
+- **`uv`** and a native PostgreSQL 17 (`brew install postgresql@17`), only for the host-side test suite.
 
 ## Run
 
 ```bash
-./scripts/run_server.sh                    # uvicorn, 4 workers, uvloop, :8080
+docker compose up -d --build --wait     # build, seed an empty DB, start everything; blocks until healthy
 curl -s localhost:8080/items | head -c 120
+docker compose ps                       # postgres, catalog, checkout, inventory, analytics, gateway: healthy
+docker compose down -v                  # tear down, including database data
 ```
+
+One service at a time:
+
+```bash
+docker compose stop analytics           # only /analytics/popular-items is affected (JSON 503)
+docker compose start analytics          # it rebuilds its window from the database
+docker compose up -d --build --no-deps analytics   # rebuild and redeploy just this one
+```
+
+`seed` runs `python -m checkout_data.seed --if-empty`, so it seeds only an empty database. A
+fresh run therefore always starts with `docker compose down -v`.
 
 ## Test
 
 ```bash
-uv run pytest -q                           # contract + integration + unit
-uv run pytest -q tests/contract            # error-catalog conformance only
-uv run python scripts/verify_invariant.py  # the graded correctness check
+uv sync
+uv run pytest -q                        # all four service apps in-process behind the gateway's route table
+uv run python scripts/check_boundaries.py
+./scripts/check_independence.sh         # needs the stack up: stop/restart each service, check the rest keep working
 ```
 
-The suite runs against its own database, `checkout_test`, created automatically on
-first run — never the `checkout` database the server uses. That isolation matters:
-`seed.py --reset` does `DROP SCHEMA public CASCADE`, so a shared database would let
-a test run destroy a live server's schema mid-flight. (The server would keep serving
-its cached catalog while every write returned `500`.) Tests and a load run can now
-proceed at the same time without touching each other. Override with
-`TEST_DATABASE_URL`; the name must end in `_test` or the suite refuses to start.
-
-**`verify_invariant.py` reads the `checkout` database, so run it after a real
-workload, not after `pytest`.** On an empty database it reports
-`Units decremented: 0` and passes vacuously — green, but proving nothing. A
-meaningful run looks like this:
+The same contract tests over real HTTP, through the gateway and the containers:
 
 ```bash
-./run.sh                                             # fresh 2000-item catalog
-cd ../load-client && ./run.sh --stations=10 --duration=60
-cd ../backend && uv run python scripts/verify_invariant.py
-# SKUs checked: 2000 / Units decremented: 97430 / Completed line items: 97430 / PASS
+docker compose -f compose.yaml -f compose.test.yaml up -d --build --wait
+GATEWAY_URL=http://localhost:8080 \
+TEST_DATABASE_URL=postgresql+asyncpg://checkout:checkout@127.0.0.1:5433/checkout_test \
+  uv run pytest -q tests/contract
+docker compose -f compose.yaml -f compose.test.yaml down -v
 ```
+
+The in-process suite runs against its own `checkout_test` database on the native
+PostgreSQL. Its name must end in `_test` or the suite refuses to start.
+`tests/unit/test_gateway_routes.py` checks that the test dispatcher's route table and
+`gateway/nginx.conf` are identical.
 
 ## Measure
 
 ```bash
-uv run python scripts/seed.py --reset
-cd ../load-client && ./build.sh && ./run.sh --baseUrl=http://localhost:8080 --stations=10 --duration=60
-cd ../backend && uv run python scripts/verify_invariant.py
+./scripts/run_load_tests.sh             # default run, then stress; fresh stack for each
+./scripts/run_load_tests.sh stress      # or: default
+docker compose run --rm tools python -m checkout_data.verify_invariant   # the graded correctness check
 ```
 
-Stress run is the same client with `--stations=100 --duration=120`.
+Each run does a fresh `down -v` and `up --wait`, then runs the load client with exactly
+the assignment's flags (`./run.sh`, and `./run.sh --stations=100 --duration=120`). It moves
+the report into `../load-client/reports/005-service-architecture/`, saves the compose logs to
+`logs/`, verifies the invariant, and leaves the last stack up for inspection.
 
-`scripts/run_load_tests.sh` does all of this end to end. For each run it reseeds, starts the
-server, runs the load client, stops the server, and verifies the invariant, then prints
-attempted / succeeded / failed counts:
+### Graded reports (2026-10-13)
 
-```bash
-./scripts/run_load_tests.sh                          # normal, then stress
-./scripts/run_load_tests.sh normal                   # or: stress
-STOCK_PER_ITEM=2000000 ./scripts/run_load_tests.sh   # clean run, nothing depletes
-```
+| Report | Config | tx/s | items/s | COMPLETE err % | Invariant |
+| --- | --- | --- | --- | --- | --- |
+| [`report-20261013-093301.json`](../load-client/reports/005-service-architecture/report-20261013-093301.json) | default (10 stations / 60 s) | 220.6 | 4 250 | 45.4 % | PASS |
+| [`report-20261013-093519.json`](../load-client/reports/005-service-architecture/report-20261013-093519.json) | stress (100 stations / 120 s) | 190.9 | 5 242 | 61.7 % | PASS |
 
-It reseeds the `checkout` database on every run. Stop any server on :8080 first, because the
-script starts its own.
+Every error is a contract-defined `409 INSUFFICIENT_STOCK` once hot SKUs sell out.
+
+Throughput is about 70 % of Week 4's native single-process run. Each request now pays a
+Docker Desktop port-forwarding hop and a gateway hop, and the services reach the database
+over TCP inside the VM. These results are therefore not directly comparable to Weeks 1–4.
+The measured breakdown is in
+[`../load-client/reports/README.md`](../load-client/reports/README.md#week-5--domain-services-under-docker-compose-2026-10-13).
 
 ## Inspect stock
 
-`DATABASE_URL` is in asyncpg form, which `psql` will not parse — connect by database
-name instead, adding `-h /tmp` if your socket is elsewhere. Everything below reads
-`inventory_stock`, the same rows the completion path decrements, so it is the truth
-rather than the API's view of it.
+Connect to the compose database from the host (port 5433), or from inside the container:
 
 ```bash
-psql -d checkout
+psql -h 127.0.0.1 -p 5433 -U checkout checkout          # password: checkout
+docker compose exec postgres psql -U checkout -d checkout
 ```
 
-Start with one row for the whole catalog. `units_sold` here should equal the
-`Units decremented` that `verify_invariant.py` reports; `below_threshold` counts
-against `LOW_STOCK_THRESHOLD` (default 50):
+One row for the whole catalog. `units_sold` should equal the `Units decremented` that the
+invariant check reports:
 
 ```sql
 SELECT count(*)                                   AS skus,
-       sum(initial_stock)                         AS initial_units,
-       sum(current_stock)                         AS units_left,
        sum(initial_stock - current_stock)         AS units_sold,
        count(*) FILTER (WHERE current_stock = 0)  AS sold_out,
        count(*) FILTER (WHERE current_stock < 50) AS below_threshold
   FROM inventory_stock;
 ```
 
-The most depleted SKUs. The client's Zipf sampler keys on catalog position, so a
-healthy run puts `SKU-000001` on top and decays steeply from there — if the ranking
-looks flat, the load did not run the way you think it did:
+What is hot right now against what is left to sell: the popular-items snapshot joined to
+live stock. A high-rank SKU at `0` is what turns later baskets into `409 INSUFFICIENT_STOCK`:
 
 ```sql
-SELECT s.sku, c.name,
-       s.initial_stock - s.current_stock AS sold,
-       s.current_stock
-  FROM inventory_stock s JOIN catalog_item c USING (sku)
- ORDER BY sold DESC, s.sku
- LIMIT 20;
-```
-
-A single item — SKUs are zero-padded to six digits, so it is `SKU-000001`, not
-`SKU-1`:
-
-```sql
-SELECT s.sku, c.name, c.price_cents, s.current_stock, s.initial_stock
-  FROM inventory_stock s JOIN catalog_item c USING (sku)
- WHERE s.sku = 'SKU-000001';
-```
-
-Alert history. One row per threshold crossing, written inside the completion
-transaction, so repeated rows for a SKU mean it crossed, was restocked, and crossed
-again — not that the alert fired twice for one descent:
-
-```sql
-SELECT sku, current_stock, threshold, triggered_at
-  FROM low_stock_alert
- ORDER BY triggered_at DESC
- LIMIT 20;
-```
-
-What is hot right now against what is left to sell — the popular-items snapshot
-joined to live stock. A high-rank SKU sitting at `0` is what turns later baskets
-into `409 INSUFFICIENT_STOCK`:
-
-```sql
-SELECT r.ord AS rank,
-       r.item->>'sku' AS sku,
-       (r.item->>'scanCount')::int AS scans,
-       s.current_stock
+SELECT r.ord AS rank, r.item->>'sku' AS sku, (r.item->>'scanCount')::int AS scans, s.current_stock
   FROM popular_window_snapshot p,
        LATERAL jsonb_array_elements(p.ranking) WITH ORDINALITY AS r(item, ord)
   JOIN inventory_stock s ON s.sku = r.item->>'sku'
@@ -192,67 +195,60 @@ SELECT r.ord AS rank,
  LIMIT 20;
 ```
 
-Transaction mix, for context on the numbers above. Only `COMPLETED` rows moved
-stock; a large `OPEN` count after a finished run means baskets were abandoned and
-the sweeper has not reached them yet:
-
-```sql
-SELECT status, count(*) FROM transaction GROUP BY status ORDER BY status;
-```
-
-To watch depletion while a run is in flight, follow any query with `\watch 2` to
-re-run it every two seconds. For scripts, use the non-interactive form:
+How the pipeline is doing:
 
 ```bash
-psql -d checkout -tAc "SELECT sum(initial_stock - current_stock) FROM inventory_stock;"
+docker compose logs analytics | grep -E 'pipeline|window published|gap skipped' | tail
 ```
 
 ## How it works
 
 | Concern | Approach | Where |
 | --- | --- | --- |
-| Catalog | Loaded once into memory; `GET /items` is a pre-rendered JSON body in ascending SKU order (the client's Zipf rank is positional) | `catalog_cache.py` (shared) |
-| Scan | One CTE: bump the transaction's denormalized counters, insert the line, `RETURNING` both — one round trip | `transactions/service.py` → `db/transactions_repo.py` |
-| Completion | One transaction: lock the tx row, collapse the basket, lock stock rows **in SKU order**, then one conditional batched `UPDATE ... WHERE current_stock >= qty`. A short row count rolls everything back as `409 INSUFFICIENT_STOCK` | `transactions/service.py` owns the transaction; each step is a `transactions_repo` call |
-| Never oversell | The conditional `UPDATE` is the mechanism; the `CHECK (current_stock >= 0)` is a backstop that should never fire | `db/transactions_repo.py` `decrement_stock` |
-| No deadlocks | Every completion takes stock locks in the same SKU order, so a lock cycle cannot form | `db/transactions_repo.py` `lock_stock` |
-| Low-stock alerts | Written inside the completion transaction, only on a threshold crossing — one row per descent, committed atomically with the decrement. `GET /inventory/low-stock` reads them back | write: `transactions/alerts.py`; read: `analytics/low_stock.py` |
-| Popular items | `transaction_item.id` is the global scan sequence; a hopping window is recomputed out of band every 500 scans via a **4-stage pipeline** (ingest → aggregate → rank → output). Filters run concurrently via asyncio queues, then all workers read the same snapshot | `analytics/pipeline.py` (IngestFilter, AggregationFilter, RankingFilter, OutputFilter), `analytics/scheduler.py`, `analytics/popular_items.py` (read-path) |
-| Money | Integer cents end to end; converted to the contract's `number` once, at the JSON boundary | `money.py` (shared) |
-
-## Expected results
-
-A default run depletes the hottest SKU partway through: the client's Zipf sampler
-gives rank-1 about 12% of all scans, so its 10 000 units run out after roughly
-82 000 scans. Every later basket containing it correctly returns `409`
-(see [research R13](./specs/001-checkout-backend/research.md)). That is the system
-working, not a fault — `verify_invariant.py` is the pass/fail criterion. A
-companion run with `STOCK_PER_ITEM=200000` demonstrates a clean 0% error rate
-without clamping stock.
+| Routing | nginx, by path: `= /items` → catalog, `/transactions` → checkout, `/inventory/` → inventory, `/analytics/` → analytics, everything else → checkout (same 404 body as before) | `gateway/nginx.conf` |
+| Catalog | Each service that needs it loads its own copy at startup; `GET /items` is a pre-rendered body in ascending SKU order | `checkout_data/catalog.py`, `catalog_service` |
+| Scan | One CTE: bump the transaction's counters, insert the line, `RETURNING` both | `checkout_service/service.py` → `repos/checkout.py` |
+| Completion | One DB transaction: lock the tx row, lock stock rows **in SKU order**, one conditional batched `UPDATE ... WHERE current_stock >= qty`, alert rows on threshold crossing. A short count rolls back as `409` | `checkout_service/service.py`, `alerts.py` |
+| Never oversell | The conditional `UPDATE`; `CHECK (current_stock >= 0)` as a backstop. Correct across Checkout replicas because the locks are in the database | `repos/checkout.py` |
+| Low-stock report | Live stock joined to the latest alert per SKU | `inventory_service` → `repos/inventory.py` |
+| Popular items | Persistent pipeline tailing `transaction_item`; one snapshot row every worker reads | `analytics_service/pipeline.py`, `supervisor.py`, `popular_items.py` |
+| Money | Integer cents end to end | `checkout_data/money.py` |
 
 ## Layout
 
 ```
-app/                   four layers; see specs/002-layered-architecture/contracts/layer-boundaries.md
-  api/               API layer: routes + request parsing (_request.py); no SQL
-  transactions/      Transactions layer: lifecycle + completion invariant (service.py),
-                     low-stock alert emission (alerts.py), abandoned-tx sweeper (sweeper.py)
-  analytics/         Analytics layer: pipelined popular-items computation (pipeline.py:
-                     IngestFilter, AggregationFilter, RankingFilter, OutputFilter),
-                     read-path for rankings (popular_items.py), low-stock report (low_stock.py),
-                     recompute scheduling (scheduler.py)
-  db/                Database access layer: engine/session/advisory lock (__init__.py),
-                     all SQL in transactions_repo.py and analytics_repo.py
-  main.py            app factory, lifespan, sweeper loop
-  config.py          env-backed settings
-  models.py          ORM models = schema source of truth
-  money.py           integer-cent helpers + the catalog price formula
-  catalog_cache.py   in-memory catalog + pre-rendered /items body (shared)
-  errors.py          ApiError codes and handlers (400/404/409/500)
+compose.yaml            postgres, seed, catalog, checkout, inventory, analytics, gateway, tools
+compose.test.yaml       test-stack override (checkout_test, small catalog, separate images)
+gateway/                nginx.conf + Dockerfile — routing only
+packages/
+  checkout_data/        SHARED DATA ACCESS: schema, engine, ownership registry, repos/<service>.py,
+                        catalog cache, seed and verify CLIs (+ the checkout-tools Dockerfile)
+  checkout_web/         SHARED HTTP CONVENTIONS: errors, request helpers, app factory, /healthz
+services/
+  catalog/              catalog_service    + requirements.lock + Dockerfile
+  checkout/             checkout_service   (service, alerts, sweeper)
+  inventory/            inventory_service  (low_stock)
+  analytics/            analytics_service  (pipeline, supervisor, popular_items)
 scripts/
-  seed.py            deterministic reset
-  verify_invariant.py  the graded correctness check
-  run_server.sh
-  run_load_tests.sh  reseed → serve → load → verify, for normal and/or stress runs
-tests/               contract / integration / unit
+  run_load_tests.sh     fresh stack → load → verify, for the default and stress runs
+  check_boundaries.py   the seven service-boundary rules
+  check_independence.sh stop/restart each service; the rest must keep working
+  lock_services.sh      regenerate the per-image requirements.lock files
+  seed.py, verify_invariant.py   host shims for the checkout_data CLIs
+tests/                  contract / integration / unit; _dispatch.py mirrors the gateway
 ```
+
+## Design artifacts
+
+- Week 5 (this architecture): [`specs/005-service-architecture/`](./specs/005-service-architecture/):
+  - [spec](./specs/005-service-architecture/spec.md)
+  - [plan](./specs/005-service-architecture/plan.md)
+  - [research](./specs/005-service-architecture/research.md)
+  - [data model](./specs/005-service-architecture/data-model.md)
+  - [contracts](./specs/005-service-architecture/contracts/)
+  - [quickstart](./specs/005-service-architecture/quickstart.md)
+  - [tasks](./specs/005-service-architecture/tasks.md)
+- Week 4 (streaming pipeline): [`specs/004-streaming-analytics/`](./specs/004-streaming-analytics/)
+- Week 3 (pipelined analytics): [`specs/003-pipelined-analytics/`](./specs/003-pipelined-analytics/)
+- Week 2 (layering): [`specs/002-layered-architecture/`](./specs/002-layered-architecture/)
+- Week 1 (behaviour, schema, contract; still authoritative): [`specs/001-checkout-backend/`](./specs/001-checkout-backend/)
