@@ -459,14 +459,14 @@ description: "Task list for 005 service-based architecture"
 
 **Purpose**: The mandatory pre-push review (requested 2026-10-13), doc consistency, and a final validation. **Nothing is pushed until T067–T068 are done.**
 
-- [ ] T067 Complete Section 1 of `specs/005-service-architecture/checklists/pre-push-review.md` (no skipped scans), using the stress run from T064:
+- [X] T067 Complete Section 1 of `specs/005-service-architecture/checklists/pre-push-review.md` (no skipped scans), using the stress run from T064:
   1. Count `gap skipped id=` lines in `logs/compose-stress.log`. Collect the ids, and against the still-running stress stack (T062 leaves it up) run `docker compose exec -T postgres psql -U checkout -tAc "select count(*) from transaction_item where id = any('{<ids>}')"`. The result must be 0.
   2. Re-run T047's oracle comparison for the final published window against the stress database.
   3. Re-confirm T048 and the check_independence catch-up results.
   4. Review the TailIngest, WindowFilter and LatestSlot code for back-pressure (only windows are ever dropped) and leader handover.
   
   Check each box, and fill in the Outcome row with the evidence (counts, commands).
-- [ ] T068 Complete Section 2 of `specs/005-service-architecture/checklists/pre-push-review.md` (the analytics `LISTEN` decision). From the T064 logs and timings, record:
+- [X] T068 Complete Section 2 of `specs/005-service-architecture/checklists/pre-push-review.md` (the analytics `LISTEN` decision). From the T064 logs and timings, record:
   - the observed scan-to-`window published` latency (compare log timestamps with the snapshot's `computed_at`);
   - the idle query rate (≈ 1000/`POPULAR_POLL_MS` per second).
   
