@@ -29,8 +29,12 @@ status() {  # <method> <path> [json-body] -> prints HTTP status
   fi
 }
 
-json_field() {  # <field> < json
-  python3 -c "import sys, json; print(json.load(sys.stdin)[sys.argv[1]])" "$1"
+json_field() {  # <field> < json; prints nothing if the body lacks it (e.g. a 503)
+  python3 -c "import sys, json
+try:
+    print(json.load(sys.stdin)[sys.argv[1]])
+except Exception:
+    pass" "$1"
 }
 
 start_tx() {
@@ -110,12 +114,15 @@ for svc in analytics catalog inventory; do
   if [ "$svc" = analytics ] && [ -z "${SKIP_CATCHUP:-}" ]; then
     want=$(( $(max_scan_id) / SLIDE * SLIDE ))
     got=""
-    for _ in $(seq 1 20); do  # within 2 s (SC-005)
+    # The gateway re-resolves upstream addresses every 5 s (nginx `resolver
+    # valid=5s`), so it may answer 503 briefly after a restart even though the
+    # container is healthy. Allow 15 s for routing to recover plus catch-up.
+    for _ in $(seq 1 150); do
       got=$(curl -s "$G/analytics/popular-items" | json_field windowEnd)
       [ "$got" = "$want" ] && break
       sleep 0.1
     done
-    [ "$got" = "$want" ] || fail "analytics catch-up: windowEnd=$got, want $want"
+    [ "$got" = "$want" ] || fail "analytics catch-up: windowEnd=${got:-<no window>}, want $want"
     echo "   caught up: windowEnd=$got"
   fi
   echo "PASS $svc"

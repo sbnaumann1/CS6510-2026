@@ -1,74 +1,60 @@
 #!/usr/bin/env bash
-# Run the load-client reports end to end: reseed, start the server, load it,
-# verify the invariant, stop the server — once per run.
+# Run the graded load-client reports end to end against the compose stack
+# (spec 005 FR-017; research R14): fresh stack, load it, verify the invariant —
+# once per run.
 #
 # Usage:
-#   ./scripts/run_load_tests.sh [normal|stress|all]     (default: all)
-#   STOCK_PER_ITEM=200000 ./scripts/run_load_tests.sh normal   # no stock-outs (001 V7)
+#   ./scripts/run_load_tests.sh [default|stress|all]    (default: all; `normal` = default)
+#   STOCK_PER_ITEM=200000 ./scripts/run_load_tests.sh default   # no stock-outs (001 V7)
 #
-# The server is restarted after every reseed on purpose: seed.py --reset drops
-# the schema, and a running server would keep its cached catalog while every
-# write fails.
+# Every run starts from `docker compose down -v`, so the database is seeded
+# fresh. The load client runs on the host with exactly the assignment's flags:
+#   default:  ./run.sh
+#   stress:   ./run.sh --stations=100 --duration=120
+# Each report is moved into load-client/reports/005-service-architecture/, and the
+# stack is left running after the last run for the pre-push review.
 set -euo pipefail
 
 BACKEND="$(cd "$(dirname "$0")/.." && pwd)"
 CLIENT="$BACKEND/../load-client"
 REPORTS="$CLIENT/reports"
+OUT="$REPORTS/005-service-architecture"
 MODE="${1:-all}"
-SERVER_PID=""
 FAILED=0
 
 case "$MODE" in
-  normal) RUNS=("normal 10 60") ;;
-  stress) RUNS=("stress 100 120") ;;
-  all)    RUNS=("normal 10 60" "stress 100 120") ;;
-  *) echo "usage: $0 [normal|stress|all]" >&2; exit 2 ;;
+  default|normal) RUNS=("default") ;;
+  stress)         RUNS=("stress") ;;
+  all)            RUNS=("default" "stress") ;;
+  *) echo "usage: $0 [default|stress|all]" >&2; exit 2 ;;
 esac
 
-port_in_use() { lsof -nP -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1; }
-
-stop_server() {
-  [ -n "$SERVER_PID" ] || return 0
-  kill "$SERVER_PID" 2>/dev/null || true
-  for _ in $(seq 1 30); do port_in_use || break; sleep 0.5; done
-  wait "$SERVER_PID" 2>/dev/null || true
-  SERVER_PID=""
-}
-trap stop_server EXIT INT TERM
-
-if port_in_use; then
-  echo "Port 8080 is already in use — stop that server first." >&2
-  exit 1
-fi
-
 cd "$BACKEND"
+mkdir -p "$OUT" logs
+docker info >/dev/null 2>&1 || { echo "Docker is not running — start Docker Desktop." >&2; exit 1; }
 (cd "$CLIENT" && ./build.sh >/dev/null)
 
-for run in "${RUNS[@]}"; do
-  read -r name stations duration <<<"$run"
+for name in "${RUNS[@]}"; do
   echo
-  echo "=== $name run: $stations stations, ${duration}s ==="
+  echo "=== $name run ==="
 
-  uv run python scripts/seed.py --reset
-
-  ./scripts/run_server.sh >"$BACKEND/server-$name.log" 2>&1 &
-  SERVER_PID=$!
-  for _ in $(seq 1 60); do
-    curl -sf -o /dev/null http://localhost:8080/items && break
-    sleep 0.5
-  done
-  curl -sf -o /dev/null http://localhost:8080/items \
-    || { echo "Server did not start; see server-$name.log" >&2; exit 1; }
+  docker compose down -v >/dev/null 2>&1
+  docker compose up -d --build --wait
 
   before=$(ls -t "$REPORTS"/report-*.json 2>/dev/null | head -1 || true)
-  (cd "$CLIENT" && ./run.sh --baseUrl=http://localhost:8080 \
-      --stations="$stations" --duration="$duration")
+  if [ "$name" = stress ]; then
+    (cd "$CLIENT" && ./run.sh --stations=100 --duration=120)
+  else
+    (cd "$CLIENT" && ./run.sh)
+  fi
   report=$(ls -t "$REPORTS"/report-*.json | head -1)
   [ "$report" != "$before" ] || { echo "No new report was written." >&2; exit 1; }
+  mv "$report" "$OUT/"
+  report="$OUT/$(basename "$report")"
 
-  stop_server
+  docker compose logs --no-color > "logs/compose-$name.log"
 
-  if ! uv run python scripts/verify_invariant.py; then
+  if ! docker compose run --rm tools python -m checkout_data.verify_invariant; then
     echo "INVARIANT FAILED for $name run" >&2
     FAILED=1
   fi
@@ -85,29 +71,28 @@ pct = lambda n: f"{n / attempted:.1%}" if attempted else "n/a"
 print(f"\n--- {name} summary ({path.rsplit('/', 1)[-1]}) ---")
 print(f"attempted: {attempted}   succeeded: {succeeded} ({pct(succeeded)})   "
       f"failed: {failed} ({pct(failed)})")
+print(f"tx/s: {d['transactionsPerSecond']:.1f}   items/s: {d['itemsPerSecond']:.0f}")
 EOF
 done
 
+echo
+echo "Stack left up for review; tear down with: docker compose down -v"
 exit "$FAILED"
 
 # ---------------------------------------------------------------------------
-# Manual equivalent (001 quickstart V6 + V8), run from backend/. This script
-# does the same thing, restarting the server after each reseed:
+# Manual equivalent, run from backend/:
 #
-#   # Normal run: 10 stations, 60 s
-#   uv run python scripts/seed.py --reset
-#   ./scripts/run_server.sh &                  # in its own terminal
-#   cd ../load-client && ./build.sh && ./run.sh --baseUrl=http://localhost:8080 --stations=10 --duration=60
-#   # stop the server (Ctrl-C)
-#   cd ../backend && uv run python scripts/verify_invariant.py
+#   # Default run: 10 stations, 60 s
+#   docker compose down -v && docker compose up -d --build --wait
+#   cd ../load-client && ./build.sh && ./run.sh
+#   mv reports/report-*.json reports/005-service-architecture/
+#   cd ../backend && docker compose run --rm tools python -m checkout_data.verify_invariant
 #
 #   # Stress run: 100 stations, 120 s
-#   uv run python scripts/seed.py --reset
-#   ./scripts/run_server.sh &                  # in its own terminal
-#   cd ../load-client && ./run.sh --baseUrl=http://localhost:8080 --stations=100 --duration=120
-#   # stop the server (Ctrl-C)
-#   cd ../backend && uv run python scripts/verify_invariant.py
+#   docker compose down -v && docker compose up -d --build --wait
+#   cd ../load-client && ./run.sh --stations=100 --duration=120
+#   mv reports/report-*.json reports/005-service-architecture/
+#   cd ../backend && docker compose run --rm tools python -m checkout_data.verify_invariant
 #
-# Optional no-stock-out variant (001 V7): prefix the seed step with
-#   STOCK_PER_ITEM=200000
+# Optional no-stock-out variant (001 V7): prefix the up step with STOCK_PER_ITEM=200000
 # ---------------------------------------------------------------------------

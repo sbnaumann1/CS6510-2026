@@ -414,7 +414,7 @@ description: "Task list for 005 service-based architecture"
 - The invariant passed after each run.
 - The README lists the services and links both reports.
 
-- [ ] T062 [US4] Rewrite `scripts/run_load_tests.sh`, keeping its structure and summary block. Usage: `[default|stress|all]`, default `all`, and accept `normal` as an alias for `default`. Per run:
+- [X] T062 [US4] Rewrite `scripts/run_load_tests.sh`, keeping its structure and summary block. Usage: `[default|stress|all]`, default `all`, and accept `normal` as an alias for `default`. Per run:
   1. `docker compose down -v`, then `docker compose up -d --build --wait`.
   2. `(cd ../load-client && ./build.sh >/dev/null)` once at the start.
   3. Run `./run.sh` for default (no flags) and `./run.sh --stations=100 --duration=120` for stress.
@@ -424,7 +424,7 @@ description: "Task list for 005 service-based architecture"
   7. Print the existing Python summary.
   
   Remove the `lsof`/`SERVER_PID`/`run_server.sh` logic, and update the trailing "manual equivalent" comment to the compose commands. **Leave the stack running after the last run** and print `stack left up for review; tear down with: docker compose down -v`. T067 queries the stress database and logs.
-- [ ] T063 [US4] Manual step: set Docker Desktop to ≥ 8 CPUs / ≥ 8 GB, confirm with `docker info --format '{{.NCPU}} {{.MemTotal}}'`, and write the values into a `<!-- docker-resources: … -->` placeholder line in `../load-client/reports/README.md`. T065 expands it.
+- [X] T063 [US4] Manual step: set Docker Desktop to ≥ 8 CPUs / ≥ 8 GB, confirm with `docker info --format '{{.NCPU}} {{.MemTotal}}'`, and write the values into a `<!-- docker-resources: … -->` placeholder line in `../load-client/reports/README.md`. T065 expands it.
 - [ ] T064 [US4] Run `./scripts/run_load_tests.sh all`. Accept the runs only if both of these hold:
   - the invariant PASSes after each;
   - neither report has errors other than COMPLETE 409 `INSUFFICIENT_STOCK`. Check `operations[*].errorCount` and `logs/compose-*.log` for `INTERNAL_ERROR` or tracebacks.
