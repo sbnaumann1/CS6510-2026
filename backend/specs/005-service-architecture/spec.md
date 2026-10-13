@@ -200,7 +200,7 @@ Entities are unchanged from spec 001. What is new is **ownership**:
 
 | Entity | Owning (writing) service | Readers |
 | --- | --- | --- |
-| Catalog Item (SKU, name, price) | Catalog (written only by seeding) | Catalog, Checkout, Inventory |
+| Catalog Item (SKU, name, price) | Catalog (written only by seeding) | Catalog, Checkout, Inventory, Analytics (item names in the ranking) |
 | Inventory Stock (on-hand quantity per SKU) | Checkout (decrements at completion; written by seeding) | Inventory |
 | Transaction (status, station, timestamps, totals) | Checkout | — |
 | Transaction Item / scan record (the global scan sequence) | Checkout | Analytics |
