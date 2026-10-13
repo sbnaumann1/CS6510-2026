@@ -1,4 +1,4 @@
-"""Transactions layer: start, scan, complete, read.
+"""Checkout Service business logic: start, scan, complete, read.
 
 The scan path is one CTE round trip (research R9). The completion path is one
 explicit DB transaction that takes stock locks in SKU order and applies a single
@@ -13,10 +13,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import catalog_cache
-from app.config import settings
-from app.db import transactions_repo as repo
-from app.errors import (
+from checkout_data import catalog as catalog_cache
+from checkout_data.config import settings
+from checkout_data.repos import checkout as repo
+from checkout_web.errors import (
     EMPTY_BASKET,
     INSUFFICIENT_STOCK,
     SKU_NOT_FOUND,
@@ -24,8 +24,8 @@ from app.errors import (
     TRANSACTION_NOT_OPEN,
     ApiError,
 )
-from app.money import cents_to_amount
-from app.transactions.alerts import emit_crossings
+from checkout_data.money import cents_to_amount
+from checkout_service.alerts import emit_crossings
 
 _TX_ID = re.compile(r"^tx-(\d+)$")
 
@@ -57,8 +57,12 @@ async def start_transaction(session: AsyncSession, station_id: str) -> dict[str,
 
 async def scan_item(
     session: AsyncSession, tx_id: int, sku: str
-) -> tuple[dict[str, Any], int | None]:
-    """Returns (ScanResult body, scan sequence number)."""
+) -> dict[str, Any]:
+    """Returns the ScanResult body.
+
+    The scan sequence (transaction_item.id) is no longer returned: Analytics
+    tails it from the shared database instead of being triggered here.
+    """
     # Resolved from memory before any DB work, so SKU_NOT_FOUND precedes
     # TRANSACTION_NOT_OPEN (error-catalog.md precedence).
     entry = catalog_cache.get(sku)
@@ -73,17 +77,14 @@ async def scan_item(
         await _raise_not_open_or_missing(session, tx_id)
 
     await session.commit()
-    return (
-        {
-            "transactionId": public_id(tx_id),
-            "sku": sku,
-            "name": name,
-            "unitPrice": cents_to_amount(price_cents),
-            "itemCount": row.item_count,
-            "runningTotal": cents_to_amount(row.running_total_cents),
-        },
-        row.scan_seq,
-    )
+    return {
+        "transactionId": public_id(tx_id),
+        "sku": sku,
+        "name": name,
+        "unitPrice": cents_to_amount(price_cents),
+        "itemCount": row.item_count,
+        "runningTotal": cents_to_amount(row.running_total_cents),
+    }
 
 
 async def _raise_not_open_or_missing(session: AsyncSession, tx_id: int) -> None:

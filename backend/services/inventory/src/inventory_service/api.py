@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import ORJSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api._request import positive_int_param
-from app.config import settings
-from app.db import get_session
-from app.analytics import low_stock as svc
+from checkout_web.request import positive_int_param
+from checkout_data.config import settings
+from checkout_data import get_session
+from inventory_service import low_stock as svc
 
 router = APIRouter(tags=["inventory"])
 

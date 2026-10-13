@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from app.money import catalog_price_cents, cents_to_amount
+from checkout_data.money import catalog_price_cents, cents_to_amount
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import transactions_repo
+from checkout_data.repos import checkout as transactions_repo
 
 
 async def emit_crossings(

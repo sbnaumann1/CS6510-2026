@@ -7,7 +7,7 @@ checked against a freshly reloaded module rather than the live instance.
 
 from __future__ import annotations
 
-from app.config import settings
+from checkout_data.config import settings
 
 
 def test_defaults_match_the_data_model_table(monkeypatch):
@@ -26,7 +26,7 @@ def test_defaults_match_the_data_model_table(monkeypatch):
 
     import importlib
 
-    import app.config as config_module
+    import checkout_data.config as config_module
 
     importlib.reload(config_module)
     fresh = config_module.Settings()

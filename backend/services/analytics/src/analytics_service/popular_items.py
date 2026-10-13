@@ -13,9 +13,9 @@ from typing import Any
 import orjson
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import catalog_cache
-from app.config import settings
-from app.db import analytics_repo as repo
+from checkout_data import catalog as catalog_cache
+from checkout_data.config import settings
+from checkout_data.repos import analytics as repo
 
 # Top 200 covers any sane ?limit=; names and rank are attached at read time from
 # the catalog cache, so the stored blob stays small.

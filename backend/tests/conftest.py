@@ -8,6 +8,10 @@ the server uses. `seed.py --reset` does `DROP SCHEMA public CASCADE`, so sharing
 would let a test run destroy a live server's schema mid-flight — the server keeps
 serving its cached catalog while every write fails with a 500. Override with
 TEST_DATABASE_URL if you need somewhere else.
+
+By default the four service apps run in-process behind tests/_dispatch.py (the
+gateway's route table). With GATEWAY_URL set, the same tests run over real HTTP
+against the compose test stack (specs/005-service-architecture/quickstart.md V3).
 """
 
 from __future__ import annotations
@@ -86,13 +90,18 @@ if not (make_url(_TEST_DSN).database or "").endswith("_test"):
     )
 
 _ensure_database(_TEST_DSN)
-# Set before importing app.config — its settings are bound at import time, and
-# load_dotenv() does not override an existing environment variable.
+# Set before importing checkout_data — its settings and engine are bound at
+# import time, and load_dotenv() does not override an existing variable.
 os.environ["DATABASE_URL"] = _TEST_DSN
 
-from app.config import settings  # noqa: E402
-from app.db import SessionLocal, engine  # noqa: E402
-from app.main import create_app  # noqa: E402
+# Gateway mode (005 research R11): the same tests over real HTTP against the
+# compose test stack. That stack is already seeded by its own `seed` step and its
+# services hold open connections, so the session never drops the schema there.
+GATEWAY_URL = os.environ.get("GATEWAY_URL")
+
+from checkout_data import SessionLocal, engine  # noqa: E402
+from checkout_data.config import settings  # noqa: E402
+from tests._dispatch import build_dispatch_app  # noqa: E402
 
 
 def _seed(reset: bool = True) -> None:
@@ -105,7 +114,7 @@ def _seed(reset: bool = True) -> None:
 @pytest.fixture(scope="session", autouse=True)
 def _schema() -> None:
     """Create the schema once for the whole session."""
-    _seed(reset=True)
+    _seed(reset=GATEWAY_URL is None)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -123,16 +132,23 @@ async def reset_db() -> None:
     _seed(reset=False)
 
 
+async def load_service_caches() -> None:
+    """Do what each service's lifespan does at startup (lifespans do not run
+    under ASGITransport): load the per-process catalog cache and pre-render the
+    catalog service's /items body."""
+    from catalog_service.main import load
+
+    await load()
+
+
 @pytest_asyncio.fixture
 async def client(reset_db) -> AsyncClient:
-    app = create_app()
-    async with AsyncClient(app=app, base_url="http://test") as c:
-        # create_app's lifespan does not run under ASGITransport, so load the
-        # catalog cache explicitly.
-        from app import catalog_cache
-
-        async with SessionLocal() as session:
-            await catalog_cache.load(session)
+    if GATEWAY_URL:
+        async with AsyncClient(base_url=GATEWAY_URL, timeout=15) as c:
+            yield c
+        return
+    async with AsyncClient(app=build_dispatch_app(), base_url="http://test") as c:
+        await load_service_caches()
         yield c
 
 

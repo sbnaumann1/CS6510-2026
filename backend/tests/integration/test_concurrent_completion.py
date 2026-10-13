@@ -10,12 +10,12 @@ import asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-from app.main import create_app
+from tests._dispatch import build_dispatch_app
 
 
 def _clients(n: int):
     """n independent clients over the same app, so requests genuinely overlap."""
-    app = create_app()
+    app = build_dispatch_app()
     return [
         AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
         for _ in range(n)

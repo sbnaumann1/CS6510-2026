@@ -129,26 +129,26 @@ description: "Task list for 005 service-based architecture"
 
 ### Services
 
-- [ ] T022 [P] [US1] Create the catalog service:
+- [X] T022 [P] [US1] Create the catalog service:
   - **`services/catalog/src/catalog_service/api.py`**: `router` with `GET /items` returning `Response(content=_body, media_type="application/json")`. Define `def render(rows) -> bytes` that builds `orjson.dumps({"items":[{"sku":s,"name":n,"price":cents_to_amount(c)} …]})` in the given (ascending SKU) order, the logic from `app/catalog_cache.load`.
   - **`main.py`**: the lifespan loads `checkout_data.catalog`, renders the body once, logs a warning `catalog is empty — run the seed` if 0 items, and disposes the engine on exit. The probe is `ping()` plus `catalog.size() > 0`; add `size()` to `checkout_data/catalog.py` if T011 omitted it. Finish with `app = create_service_app("catalog", [api.router], probe, lifespan)`.
-- [ ] T023 [US1] Move `app/transactions/service.py` to `services/checkout/src/checkout_service/service.py`:
+- [X] T023 [US1] Move `app/transactions/service.py` to `services/checkout/src/checkout_service/service.py`:
   - **Imports**: `checkout_data.catalog` (replaces `app.catalog_cache`), `checkout_data.repos.checkout as repo`, `checkout_data.config.settings`, `checkout_data.money`, `checkout_web.errors`, and `.alerts`.
   - **`scan_item`**: change it to return only the ScanResult dict, dropping `scan_seq`. Nothing consumes the sequence any more.
-- [ ] T024 [P] [US1] Move `app/transactions/alerts.py` to `services/checkout/src/checkout_service/alerts.py` (using `checkout_data.repos.checkout.insert_alerts`), and `app/transactions/sweeper.py` to `services/checkout/src/checkout_service/sweeper.py` (using `checkout_data.SessionLocal` and `repos.checkout`).
-- [ ] T025 [US1] Move `app/api/transactions.py` to `services/checkout/src/checkout_service/api.py`, with imports from `checkout_web.request`, `checkout_data.get_session` and `.service`. **Delete** the `BackgroundTasks` parameter, `from app.analytics import scheduler`, and the `should_recompute`/`add_task` lines: the scan route just returns `ORJSONResponse(content=await svc.scan_item(...))`. Depends on T023.
-- [ ] T026 [US1] Create `services/checkout/src/checkout_service/main.py`:
+- [X] T024 [P] [US1] Move `app/transactions/alerts.py` to `services/checkout/src/checkout_service/alerts.py` (using `checkout_data.repos.checkout.insert_alerts`), and `app/transactions/sweeper.py` to `services/checkout/src/checkout_service/sweeper.py` (using `checkout_data.SessionLocal` and `repos.checkout`).
+- [X] T025 [US1] Move `app/api/transactions.py` to `services/checkout/src/checkout_service/api.py`, with imports from `checkout_web.request`, `checkout_data.get_session` and `.service`. **Delete** the `BackgroundTasks` parameter, `from app.analytics import scheduler`, and the `should_recompute`/`add_task` lines: the scan route just returns `ORJSONResponse(content=await svc.scan_item(...))`. Depends on T023.
+- [X] T026 [US1] Create `services/checkout/src/checkout_service/main.py`:
   - The lifespan loads `checkout_data.catalog` (with the same empty-catalog warning) and starts `_sweep_loop()`, moved verbatim from `app/main.py` and calling `sweeper.sweep_abandoned`.
   - On exit it cancels the sweeper and calls `dispose_engine()`.
   - The probe is `ping()` plus `catalog.size() > 0`.
   - Finish with `app = create_service_app("checkout", [api.router], probe, lifespan)`.
   
   Depends on T024, T025.
-- [ ] T027 [P] [US1] Create the inventory service:
+- [X] T027 [P] [US1] Create the inventory service:
   - `services/inventory/src/inventory_service/low_stock.py`: moved from `app/analytics/low_stock.py`, using `checkout_data.repos.inventory`.
   - `api.py`: moved from `app/api/inventory.py`, using `checkout_web.request.positive_int_param`.
   - `main.py`: no catalog cache; the probe is `ping()`; the lifespan only disposes the engine. Finish with `app = create_service_app("inventory", …)`.
-- [ ] T028 [P] [US1] Create the analytics read path:
+- [X] T028 [P] [US1] Create the analytics read path:
   - **`popular_items.py`**: moved from `app/analytics/popular_items.py`, using `checkout_data.catalog.name_of` and `checkout_data.repos.analytics`. Keep `read()` and `_render()` unchanged, and keep `recompute()` for now (T060 removes it).
   - **`api.py`**: moved from `app/api/analytics.py`.
   - **`main.py`**: the lifespan loads `checkout_data.catalog` and disposes the engine on exit; the probe is `ping()` plus `catalog.size() > 0`. Finish with `app = create_service_app("analytics", …)`.
@@ -157,17 +157,17 @@ description: "Task list for 005 service-based architecture"
 
 ### Test harness (in-process mode)
 
-- [ ] T029 [US1] Create `tests/_dispatch.py`, the test-only gateway twin.
+- [X] T029 [US1] Create `tests/_dispatch.py`, the test-only gateway twin.
   - **Route table**: `ROUTES = [("exact", "/items", "catalog"), ("prefix", "/transactions", "checkout"), ("prefix", "/inventory/", "inventory"), ("prefix", "/analytics/", "analytics"), ("default", "/", "checkout")]`. This mirrors [contracts/gateway-routes.md](./contracts/gateway-routes.md) (`/gateway/healthz` is nginx-only and excluded).
   - **`route(path) -> str`**: applies nginx semantics: exact first, then the longest matching prefix, then the default.
   - **`build_dispatch_app()`**: returns an ASGI callable. It imports `catalog_service.main.app`, `checkout_service.main.app`, `inventory_service.main.app` and `analytics_service.main.app` into `apps = {"catalog": …, …}`, and forwards each `http` scope to `apps[route(scope["path"])]` (`await apps[name](scope, receive, send)`).
-- [ ] T030 [US1] Rewrite `tests/conftest.py`. Keep the `_test` database safety net, `_ensure_database`, `_seed`, `_schema`, `reset_db`, `session`, `catalog_size` and `stock_per_item`, with imports moved to `checkout_data` (`from checkout_data import SessionLocal, engine`, `from checkout_data.config import settings`). Then:
+- [X] T030 [US1] Rewrite `tests/conftest.py`. Keep the `_test` database safety net, `_ensure_database`, `_seed`, `_schema`, `reset_db`, `session`, `catalog_size` and `stock_per_item`, with imports moved to `checkout_data` (`from checkout_data import SessionLocal, engine`, `from checkout_data.config import settings`). Then:
   1. **`client` default**: `AsyncClient(app=build_dispatch_app(), base_url="http://test")`, after `await checkout_data.catalog.load(session)` (the lifespans don't run under ASGITransport).
   2. **`client` in gateway mode**: if `GATEWAY_URL` is set, `AsyncClient(base_url=os.environ["GATEWAY_URL"])` with no catalog load. In that mode the DSN comes from `TEST_DATABASE_URL`, unchanged logic.
   3. **`dispose` fixture**: keep `_dispose_engine_per_loop`.
   
   Depends on T029.
-- [ ] T031 [US1] Update test imports. Change:
+- [X] T031 [US1] Update test imports. Change:
   - `from app.config` → `from checkout_data.config`
   - `from app.money` → `from checkout_data.money`
   - `from app.analytics import popular_items` → `from analytics_service import popular_items`

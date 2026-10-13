@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from app.config import settings
-from app.db import SessionLocal, transactions_repo
+from checkout_data.config import settings
+from checkout_data import SessionLocal
+from checkout_data.repos import checkout as transactions_repo
 
 
 async def sweep_abandoned() -> int:

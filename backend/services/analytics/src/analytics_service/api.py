@@ -6,9 +6,9 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import ORJSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api._request import positive_int_param
-from app.db import get_session
-from app.analytics import popular_items as svc
+from checkout_web.request import positive_int_param
+from checkout_data import get_session
+from analytics_service import popular_items as svc
 
 router = APIRouter(tags=["analytics"])
 
