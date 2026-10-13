@@ -41,7 +41,7 @@ services are coupled.
 
 ### Session 2026-10-13
 
-- Q: How should the "start everything" command work? → A: Docker Compose only, run with Podman (`podman compose`). Every domain service and the Gateway is its own container image. The centralized database and the seed step also run as compose services. All measured load runs go against this compose stack. There is no separate native-process launch path.
+- Q: How should the "start everything" command work? → A: Docker Compose only, run with Docker (`docker compose`, via Docker Desktop). Podman was briefly chosen, then replaced by plain Docker. Every domain service and the Gateway is its own container image. The centralized database and the seed step also run as compose services. All measured load runs go against this compose stack. There is no separate native-process launch path.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -58,7 +58,7 @@ database.
 graded correctness invariant breaks, nothing else matters. It is also the MVP:
 Gateway + Catalog + Checkout already serve the full load-client checkout flow.
 
-**Independent Test**: Run `podman compose up` (which seeds the database and starts every service
+**Independent Test**: Run `docker compose up` (which seeds the database and starts every service
 and the Gateway), run the existing contract and integration
 test suites against the Gateway address, run the load client with default
 parameters, then run the correctness-invariant check.
@@ -82,7 +82,7 @@ not by starting one process that contains them all.
 **Why this priority**: Independent deployability is the defining property
 being graded. It is P1 alongside Story 1.
 
-**Independent Test**: With the compose stack running, stop only the Analytics Service's container (`podman compose stop analytics`).
+**Independent Test**: With the compose stack running, stop only the Analytics Service's container (`docker compose stop analytics`).
 Catalog and checkout requests keep succeeding through the Gateway. Popular-items
 requests fail with a gateway-unavailable response. Restart Analytics and those
 requests recover without touching any other unit.
@@ -140,7 +140,7 @@ as their base URL, and show the stated station count and duration.
 
 **Acceptance Scenarios**:
 
-1. **Given** a freshly started compose stack (`podman compose down -v` then `podman compose up`), **When** the load client runs on the host with default parameters, **Then** its JSON report is committed under the documented reports path for spec 005.
+1. **Given** a freshly started compose stack (`docker compose down -v` then `docker compose up`), **When** the load client runs on the host with default parameters, **Then** its JSON report is committed under the documented reports path for spec 005.
 2. **Given** a freshly restarted compose stack (re-seeded the same way), **When** the load client runs with `--stations=100 --duration=120`, **Then** its JSON report is committed alongside the first and shows 100 stations and a 120-second duration.
 3. **Given** the README, **When** the grader reads it, **Then** it lists the four domain services (plus the Gateway as infrastructure), and links both reports.
 
@@ -156,7 +156,7 @@ as their base URL, and show the stated station count and duration.
 - **Catalog data is read by Checkout and Catalog independently**: both read the same immutable-during-a-run catalog rows, so their views cannot diverge during a run. Re-seeding requires restarting both.
 - **Re-seeding while services are running**: not supported (unchanged from today). Re-seeding happens only by bringing the stack down and up again. The seed step runs once per `up`, and domain services do not start until it has completed successfully.
 - **Database not yet ready when services start**: services wait for the database container to report healthy and for the seed step to finish. A service that starts against an empty catalog would cache it empty, which is the failure mode today's startup warning exists for.
-- **Podman machine not running**: `podman compose up` fails fast with Podman's own error. The README lists `podman machine start` as a prerequisite step.
+- **Docker daemon not running**: `docker compose up` fails fast with Docker's "cannot connect to the Docker daemon" error. The README lists starting Docker Desktop as a prerequisite step.
 - **A schema change in the Shared Data Access library**: every service that depends on the changed table must be redeployed against the new library version. This coupling is accepted and documented, not hidden.
 
 ## Requirements *(mandatory)*
@@ -166,11 +166,11 @@ as their base URL, and show the stated station count and duration.
 **Service decomposition and deployment**
 
 - **FR-001**: The system MUST be decomposed into exactly four domain services (Catalog, Checkout, Inventory, Analytics), with the endpoint and background-work ownership given in the Overview table.
-- **FR-002**: Each domain service MUST be an independently deployable unit: its own entry point, its own container image, and its own compose service entry, running in its own container. Starting one service (`podman compose up <service>`) MUST NOT start another domain service. It may start the database it depends on.
+- **FR-002**: Each domain service MUST be an independently deployable unit: its own entry point, its own container image, and its own compose service entry, running in its own container. Starting one service (`docker compose up <service>`) MUST NOT start another domain service. It may start the database it depends on.
 - **FR-003**: Each service MUST be independently stoppable and restartable without restarting any other unit, and MUST recover its working state from the shared database on start.
 - **FR-004**: A Gateway MUST expose the single public address the load client targets (default `http://localhost:8080`) and route each request by path to the owning service. It MUST contain no business logic, validation, or database access.
-- **FR-005**: The repository MUST provide one compose file such that `podman compose up` builds all images, starts the centralized database, runs the seed step to completion, then starts all four domain services and the Gateway. `podman compose down -v` MUST tear everything down, including database data, so the next `up` starts from a freshly seeded state. Podman (with a compose provider) is the only runtime prerequisite besides the load client's JDK. Running the services natively is not a supported path.
-- **FR-005a**: Every domain service and the Gateway MUST expose a health check that the compose file uses, so `podman compose up` only reports the system ready (and only publishes the Gateway on host port 8080) once every unit is healthy.
+- **FR-005**: The repository MUST provide one compose file such that `docker compose up` builds all images, starts the centralized database, runs the seed step to completion, then starts all four domain services and the Gateway. `docker compose down -v` MUST tear everything down, including database data, so the next `up` starts from a freshly seeded state. Docker (Docker Desktop with Compose v2) is the only runtime prerequisite besides the load client's JDK. Running the services natively is not a supported path.
+- **FR-005a**: Every domain service and the Gateway MUST expose a health check that the compose file uses, so `docker compose up` only reports the system ready (and only publishes the Gateway on host port 8080) once every unit is healthy.
 
 **External behavior (unchanged)**
 
@@ -191,7 +191,7 @@ as their base URL, and show the stated station count and duration.
 **Verification and deliverables**
 
 - **FR-016**: The repository MUST include an automated boundary check that fails if any service imports another service's code, if any service contains outbound calls to another service, or if any service writes to a table it does not own.
-- **FR-017**: The repository MUST contain two load-client JSON reports produced against the compose stack: one with default parameters and one with `--stations=100 --duration=120`. Each is run from the host against `http://localhost:8080` immediately after a fresh `podman compose down -v && podman compose up`.
+- **FR-017**: The repository MUST contain two load-client JSON reports produced against the compose stack: one with default parameters and one with `--stations=100 --duration=120`. Each is run from the host against `http://localhost:8080` immediately after a fresh `docker compose down -v && docker compose up`.
 - **FR-018**: The README MUST list the defined services (with their responsibilities and owned endpoints), describe how shared database access is packaged and distributed, and link both reports.
 
 ### Key Entities *(include if feature involves data)*
@@ -219,7 +219,7 @@ Entities are unchanged from spec 001. What is new is **ownership**:
 - **SC-003**: Stopping any one domain service affects only that service's endpoints. The other services' endpoints keep a 100% success rate during the outage.
 - **SC-004**: The boundary check reports zero cross-service imports, zero service-to-service calls, and zero writes outside a table's owner.
 - **SC-005**: After a slide boundary is crossed, the popular-items window seen by clients updates within 2 seconds.
-- **SC-006**: Stress-run throughput (completed transactions per second) is reported next to the spec 004 stress-run throughput on the same machine. If it is below 80% of that figure, the README explains the measured cause. Expected causes are the added gateway hop and the containerized stack running inside the Podman VM, where spec 004 used native processes and a native database.
+- **SC-006**: Stress-run throughput (completed transactions per second) is reported next to the spec 004 stress-run throughput on the same machine. If it is below 80% of that figure, the README explains the measured cause. Expected causes are the added gateway hop and the containerized stack running inside the Docker Desktop VM, where spec 004 used native processes and a native database.
 - **SC-007**: A reader of the README can name every service, its responsibility, and how services share data, without reading any code.
 
 ## Assumptions
@@ -227,8 +227,8 @@ Entities are unchanged from spec 001. What is new is **ownership**:
 - **Gateway is acceptable infrastructure**: the load client accepts one base URL, so a path-routing gateway is needed. It is treated as routing infrastructure, not a domain service, and is not counted in the service list.
 - **Four services is the right granularity**: Inventory is split from Checkout because reporting stock health is a separate business function from selling. Stock decrements stay in Checkout, because completion has to lock and decrement stock in one database transaction to keep the invariant. Splitting that write across services would need direct coordination, which the assignment discourages.
 - **Seeding is an operator tool, not a service**: the seed script writes catalog and stock directly. It runs before services start and is not a deployable service.
-- **Container-per-service on one host, via Podman**: "deployable unit" is met by each service having its own container image and compose entry. The whole system, database included, runs under `podman compose` on the developer's machine, which delegates to an installed compose provider. This deliberately departs from research R3 of 001, where measured runs used a native database. Results are therefore not directly comparable to weeks 1–4, and the README must say so next to the reports.
-- **Podman is installed by the operator**: it is not currently installed on the development machine. The README documents a one-time setup (install Podman, `podman machine init`, `podman machine start`). The Podman VM's CPU and memory must be sized for the stress run, and the plan sets the recommended values.
+- **Container-per-service on one host, via Docker**: "deployable unit" is met by each service having its own container image and compose entry. The whole system, database included, runs under `docker compose` on the developer's machine. This deliberately departs from research R3 of 001, where measured runs used a native database. Results are therefore not directly comparable to weeks 1–4, and the README must say so next to the reports.
+- **Docker Desktop is already installed** on the development machine (Docker 28, Compose v2). The README documents starting it before `docker compose up`. Docker Desktop's VM CPU and memory allocation must be sized for the stress run, and the plan sets the recommended values.
 - **The streaming pipeline from spec 004 moves intact into the Analytics Service**: only its trigger changes, from an in-process call on scan to database-observed scan progress.
 - **Worker counts per service are a tuning choice** made during planning, set through compose environment variables. The total database connections across all services must stay within the database container's configured connection limit.
 - **Reports location**: reports are committed under the load client's reports directory, in a subfolder named for spec 005, so earlier weeks' reports stay distinguishable.
