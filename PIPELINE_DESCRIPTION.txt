@@ -1,63 +1,64 @@
-PIPELINED POPULAR ITEMS ANALYTICS
+PERSISTENT STREAMING POPULAR-ITEMS PIPELINE (spec 005)
 
-The system has a 4-stage pipeline:
+The popular-items analytics runs inside the Analytics Service as ONE persistent
+pipeline for the life of the service, with 5 filters connected by queues:
 
-1. IngestFilter (reads from DB)
-   → AggregationFilter (buffers and forwards aggregated counts)
-   → RankingFilter (ranks items by scan count)
-   → OutputFilter (persists snapshot to DB)
+1. TailIngest (reads the shared database)
+   -> WindowFilter (slides the 1000-scan window by scan id, every 500)
+   -> AggregationFilter (running per-SKU counts, updated incrementally)
+   -> RankingFilter (top 200 by count, ties by SKU)
+   -> OutputFilter (persists each window to the DB; latest-wins)
 
-The pipes are implemented using Python asyncio queues for asynchronous inter-stage
-communication. Each filter runs concurrently and processes data as it becomes available
-from previous stages. Filters signal end-of-stream by sending None sentinel values.
+There is no per-slide pipeline run and no in-process trigger from the scan route.
+The pipeline learns about scans only by tailing transaction_item, which the
+Checkout Service writes; Checkout never calls Analytics.
 
 FILTER DESCRIPTIONS:
 
-IngestFilter:
-  Purpose: Reads scan data from the database within the current window bounds.
-  Input: Window start and end sequence numbers
-  Output: AggregatedData objects (sku, scan_count) for each item in top 200
-  Implementation: Executes window_counts query and emits each row asynchronously
+TailIngest:
+  Purpose: Follow the scan record as rows commit.
+  Input:   SELECT id, sku FROM transaction_item WHERE id > last_id ORDER BY id LIMIT 1000
+  Output:  ScanData(scan_id, sku) in id order, and Watermark(b) once every id <= b
+           (b a multiple of 500) has arrived or been declared a gap.
+  Notes:   Keeps a contiguous watermark so out-of-order commits are never skipped;
+           a hole open longer than 1 s is a never-committed id and is skipped
+           ("gap skipped id=N"). Sleeps 100 ms only when caught up or stuck.
+
+WindowFilter:
+  Purpose: Maintain the window by scan id.
+  Input:   ScanData and Watermark items.
+  Output:  Slide(window_start, window_end, added SKUs, evicted SKUs) per watermark.
 
 AggregationFilter:
-  Purpose: Provides isolation and buffering between ingestion and ranking stages.
-  Input: AggregatedData from IngestFilter queue
-  Output: AggregatedData forwarded to RankingFilter queue
-  Implementation: Simple forwarding stage that maintains queue separation
+  Purpose: Keep per-SKU counts for the current window.
+  Input:   Slide.
+  Output:  WindowCounts(window_start, window_end, counts).
+  Notes:   One Counter for the pipeline's lifetime: +added, -evicted per slide.
 
 RankingFilter:
-  Purpose: Accumulates aggregated data and ranks items by scan count.
-  Input: AggregatedData from AggregationFilter queue
-  Output: RankedData containing ranked items with metadata
-  Implementation: Collects all scan counts, ranks them, creates final output
+  Purpose: Rank the window.
+  Input:   WindowCounts.
+  Output:  RankedData with the top 200, ordered by (-count, sku).
 
 OutputFilter:
-  Purpose: Persists the computed window snapshot to the database.
-  Input: RankedData from RankingFilter queue
-  Output: Side effect only (writes to DB, commits transaction)
-  Implementation: Converts RankedData to JSON and upserts popular_window_snapshot table
+  Purpose: Publish each window.
+  Input:   RankedData via a one-item latest-wins slot.
+  Output:  Upsert of popular_window_snapshot + commit per window
+           ("window published start=S end=E").
 
 COMMUNICATION MODEL:
 
-Queues connect filters in a pipeline:
-  IngestFilter --[Queue1]--> AggregationFilter --[Queue2]--> RankingFilter --[Queue3]--> OutputFilter
+  TailIngest --[q1, 10000]--> WindowFilter --[q2, 64]--> AggregationFilter
+             --[q3, 64]--> RankingFilter --[latest-wins slot]--> OutputFilter
 
-Each filter:
-- Reads from input queue (async wait if empty)
-- Processes the data
-- Writes to output queue
-- Sends None to signal end-of-stream
+Bounded queues back-pressure the tail instead of growing memory; only the final
+slot ever drops anything, and what it drops is a superseded window, never a scan.
 
-EXECUTION:
+LIFECYCLE:
 
-All four filters run concurrently via asyncio.gather(). Data flows through the pipeline
-stages asynchronously, allowing overlapping computation. The pipeline terminates when
-the OutputFilter receives the final None sentinel and completes its database commit.
+A supervisor holds a PostgreSQL advisory lock (one pipeline across all Analytics
+replicas), bootstraps from the latest 500-boundary minus 1000 so the first
+window published is complete, rebuilds the pipeline from the database after any
+error, and on shutdown stops the tail and lets TERMINATE drain downstream.
 
-ADVANTAGES:
-
-- Concurrent execution of independent stages
-- Natural decomposition of analytics computation
-- Backpressure handling via queue sizes
-- Modularity and testability
-- Memory efficiency through streaming (no large intermediate collections)
+See backend/specs/005-service-architecture/research.md R5-R6.

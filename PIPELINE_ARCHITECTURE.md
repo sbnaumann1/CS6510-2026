@@ -1,102 +1,70 @@
-# Pipelined Analytics Architecture
+# Persistent Streaming Pipeline for Popular-Items Analytics
 
 ## Overview
 
-The popular items windowed analytics functionality has been refactored into a multi-stage pipeline architecture. The system decomposes the analytics computation into independent, concurrent filters connected by asyncio queues for asynchronous inter-filter communication.
+Since spec 005 (service-based architecture), popular-items analytics runs inside the
+**Analytics Service**. It is **one persistent streaming pipeline** for the life of the
+service. It is no longer a fresh pipeline run triggered every 500 scans.
 
-## Pipeline Stages
+The pipeline learns about new scans only by **tailing the shared scan record**
+(`transaction_item`, whose `id` is the global scan sequence) in the centralized
+database. The Checkout Service writes those rows and never calls, or even knows about,
+Analytics.
 
-### 1. **IngestFilter**
-- **Purpose**: Reads scan data from the database within the window bounds
-- **Input**: Window start and end sequence numbers
-- **Output**: `AggregatedData` objects representing scan counts per SKU
-- **Implementation**: Fetches window_counts from the analytics repository and emits each row to the output queue
+Design and rationale: `backend/specs/005-service-architecture/research.md` R5–R6 and
+`data-model.md` §3. Code: `backend/services/analytics/src/analytics_service/pipeline.py`
+(filters) and `supervisor.py` (lifecycle).
 
-### 2. **AggregationFilter**
-- **Purpose**: Buffers and forwards aggregated scan count data
-- **Input**: `AggregatedData` from IngestFilter
-- **Output**: `AggregatedData` forwarded to RankingFilter
-- **Implementation**: Acts as a pass-through stage that maintains queue isolation between stages
-
-### 3. **RankingFilter**
-- **Purpose**: Ranks items by scan count and prepares final output
-- **Input**: `AggregatedData` from AggregationFilter
-- **Output**: `RankedData` containing ranked items with window metadata
-- **Implementation**: Accumulates aggregated data, sorts/ranks, and emits the final ranked list
-
-### 4. **OutputFilter**
-- **Purpose**: Persists the final snapshot to the database
-- **Input**: `RankedData` from RankingFilter
-- **Output**: None (side effect only - writes to DB)
-- **Implementation**: Converts RankedData to JSON and upserts the popular_window_snapshot table
-
-## Inter-Filter Communication
-
-Filters communicate through asyncio queues:
-```
-IngestFilter → [Queue 1] → AggregationFilter → [Queue 2] → RankingFilter → [Queue 3] → OutputFilter
+```text
+TailIngest ─q1─▶ WindowFilter ─q2─▶ AggregationFilter ─q3─▶ RankingFilter ─slot─▶ OutputFilter
+ (DB tail)       (slide by id)      (running counts)        (top-200)              (latest-wins, commit)
 ```
 
-Each filter:
-- Reads from its input queue (blocks if empty)
-- Processes the data
-- Writes to its output queue
-- Sends `None` sentinel value to signal end-of-stream
+Every filter is a long-running loop that keeps its state across windows.
+`TERMINATE` flows downstream only at shutdown, never between windows.
 
-This design enables:
-- **Asynchronous execution**: Filters run concurrently, processing different items independently
-- **Backpressure handling**: Queue sizes naturally limit memory usage
-- **Modularity**: Each filter has a single responsibility
-- **Testability**: Filters can be tested in isolation
+## Filters
 
-## Data Model
+### 1. TailIngest (replaces the per-run IngestFilter)
+- **Input**: the shared database. It polls `SELECT id, sku FROM transaction_item WHERE id > :last_id ORDER BY id LIMIT 1000`.
+- **Output**: `ScanData(scan_id, sku)` in id order, plus `Watermark(boundary)` once every id ≤ boundary is accounted for.
+- **Gap rule**: concurrent scans commit out of id order, so the tail keeps a *contiguous* watermark `last_id`. Rows above a hole wait until the hole fills. A hole still open after 1 s (`POPULAR_GAP_GRACE_MS`) is a sequence value that never committed: the tail logs `gap skipped id=<n>` and moves on.
+- **Pacing**: full batches are read back to back, so a backlog drains at DB speed. It sleeps `POPULAR_POLL_MS` (100 ms) only when caught up or waiting on a hole.
 
-### AggregatedData
-```python
-@dataclass
-class AggregatedData:
-    sku: str          # Stock Keeping Unit
-    scan_count: int   # Count of scans within window
-```
+### 2. WindowFilter
+- Keeps a deque of recent scans. The window is defined by **scan id**, not arrival count.
+- On `Watermark(b)` (every multiple of 500) it emits `Slide(b−1000, b, added, evicted)`: the SKUs entering and leaving the 1000-scan window.
 
-### RankedData
-```python
-@dataclass
-class RankedData:
-    window_size: int        # Total window size (scans)
-    slide_interval: int     # Slide interval for hopping window
-    window_start: int       # Window start sequence (exclusive)
-    window_end: int         # Window end sequence (inclusive)
-    ranking: list[dict]     # List of {"sku": "...", "scanCount": N}
-```
+### 3. AggregationFilter
+- Keeps **one running `Counter`** for the pipeline's lifetime. Each slide applies +1 per added scan and −1 per evicted scan, which is O(500) work per slide rather than a fresh count of 1000.
+- It emits `WindowCounts`.
 
-## Integration
+### 4. RankingFilter
+- Sorts by `(−count, sku)`, so ties break by SKU, matching the SQL `window_counts`. It keeps the top 200 and emits `RankedData`.
 
-The pipeline is invoked through `pipeline.recompute_windowed()` which:
-1. Computes the current window bounds based on the max scan sequence
-2. Creates asyncio queues for inter-filter communication
-3. Instantiates each filter with its configuration
-4. Runs all filters concurrently using `asyncio.gather()`
+### 5. OutputFilter
+- Reads from a **latest-wins slot**: if several windows are ready at once, only the newest is written, because clients only ever see the latest snapshot.
+- Upserts `popular_window_snapshot`, **commits each window**, and logs `window published start=<s> end=<e>`.
 
-This replaces the previous direct call to `popular_items.recompute()` in the scheduler.
+## Lifecycle (supervisor.py)
 
-## Performance Characteristics
+1. **Leader lock**: a PostgreSQL session-level advisory lock on a dedicated connection. At most one pipeline runs across all Analytics replicas. Standbys retry every 2 s.
+2. **Bootstrap**:
+   - Read the max scan id and set `b0` to the latest 500-boundary.
+   - Tail from `b0 − 1000`, so the first window published is `b0` and complete.
+   - Log `pipeline started bootstrap_from=<id>`.
+   - A restart therefore catches up from the database, and nothing is lost while Analytics is down.
+3. **Errors**: any filter exception cancels all filters, and the pipeline re-bootstraps after 1 s.
+4. **Shutdown**: the tail is stopped, then `TERMINATE` drains downstream.
 
-- **Latency**: Filters process items as soon as they arrive from previous stages
-- **Throughput**: Limited by the slowest stage; queues provide buffering
-- **Memory**: Queue-based communication avoids materializing entire datasets
-- **Scalability**: Can add more stages or enhance existing stages without changing interface
+## Correctness checks
 
-## Testing
+- `tests/integration/test_persistent_pipeline.py`: with 8 concurrent scanners, every published window equals a direct SQL count over the same bounds, and only one pipeline instance exists for the run.
+- `tests/integration/test_pipeline_restart.py`: after a restart, the first window is the complete latest one.
+- `tests/unit/test_tail_ingest_gaps.py`, `tests/unit/test_pipeline_filters.py`: each filter in isolation, including late commits and permanent gaps.
 
-The pipeline was tested with the load client under two scenarios:
+## History
 
-### Normal Load Test
-- 10 stations, 60 seconds duration
-- Results: report-20260929-202454.json
-- Popular items ranking generated correctly
-
-### Stress Test
-- 100 stations, 120 seconds duration
-- Results: report-YYYYMMDD-HHMMSS.json
-- Tests pipeline under high concurrent load
+- **Spec 003**: a 4-stage batch pipeline, run per trigger.
+- **Spec 004**: a streaming pipeline, still triggered in-process by the scan route every 500 scans and rebuilt each time.
+- **Spec 005**: the trigger is gone, and the pipeline persists for the life of the service.
