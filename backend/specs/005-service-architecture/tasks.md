@@ -27,7 +27,7 @@ description: "Task list for 005 service-based architecture"
 
 **Purpose**: Turn `backend/` into a uv workspace with six member packages, all installable but still empty.
 
-- [ ] T001 Create the directory skeleton:
+- [X] T001 Create the directory skeleton:
   - `packages/checkout_data/src/checkout_data/repos/`
   - `packages/checkout_web/src/checkout_web/`
   - `services/catalog/src/catalog_service/`
@@ -38,16 +38,16 @@ description: "Task list for 005 service-based architecture"
   - `logs/`
   
   Give each Python package dir an empty `__init__.py`, and add `logs/` to `.gitignore`.
-- [ ] T002 [P] Create `packages/checkout_data/pyproject.toml`:
+- [X] T002 [P] Create `packages/checkout_data/pyproject.toml`:
   - `name = "checkout-data"`, `version = "0.5.0"`, `requires-python = ">=3.11"`.
   - dependencies `sqlalchemy[asyncio]==2.0.23`, `greenlet>=3.0.0`, `asyncpg==0.29.0`, `psycopg2-binary==2.9.9`, `python-dotenv==1.0.0`.
   - build backend `hatchling`, with `[tool.hatch.build.targets.wheel] packages = ["src/checkout_data"]`.
-- [ ] T003 [P] Create `packages/checkout_web/pyproject.toml`: `name = "checkout-web"`, `version = "0.5.0"`, dependencies `fastapi==0.104.1`, `uvicorn[standard]==0.24.0`, `orjson==3.9.10`, `pydantic==2.5.0`. Use the same hatchling layout as T002.
-- [ ] T004 [P] Create the four service manifests: `services/catalog/pyproject.toml`, `services/checkout/pyproject.toml`, `services/inventory/pyproject.toml` and `services/analytics/pyproject.toml`.
+- [X] T003 [P] Create `packages/checkout_web/pyproject.toml`: `name = "checkout-web"`, `version = "0.5.0"`, dependencies `fastapi==0.104.1`, `uvicorn[standard]==0.24.0`, `orjson==3.9.10`, `pydantic==2.5.0`. Use the same hatchling layout as T002.
+- [X] T004 [P] Create the four service manifests: `services/catalog/pyproject.toml`, `services/checkout/pyproject.toml`, `services/inventory/pyproject.toml` and `services/analytics/pyproject.toml`.
   - Names are `catalog-service`, `checkout-service`, `inventory-service` and `analytics-service`, each `version = "0.5.0"`.
   - Each depends on `checkout-data==0.5.0`, `checkout-web==0.5.0` and `orjson==3.9.10`, with `[tool.uv.sources] checkout-data = { workspace = true }` and `checkout-web = { workspace = true }`.
   - Same hatchling layout, pointing at `src/<name>_service`.
-- [ ] T005 Rewrite `pyproject.toml` as the workspace root:
+- [X] T005 Rewrite `pyproject.toml` as the workspace root:
   - **Workspace**: `[tool.uv.workspace] members = ["packages/*", "services/*"]`, and `[tool.uv] package = false`.
   - **Dependencies**: `project.dependencies` = the six member names, each with `{ workspace = true }` in `[tool.uv.sources]`.
   - **Unchanged**: keep `[dependency-groups] dev` and `[tool.pytest.ini_options]` exactly as they are.
@@ -62,19 +62,19 @@ description: "Task list for 005 service-based architecture"
 
 **⚠️ CRITICAL**: No service can be built until this phase is complete. The old `app/` package stays untouched and working until T031.
 
-- [ ] T006 [P] Move `app/config.py` to `packages/checkout_data/src/checkout_data/config.py`. Add these fields to `Settings`:
+- [X] T006 [P] Move `app/config.py` to `packages/checkout_data/src/checkout_data/config.py`. Add these fields to `Settings`:
   - `popular_poll_ms: int = _int("POPULAR_POLL_MS", 100)`
   - `popular_gap_grace_ms: int = _int("POPULAR_GAP_GRACE_MS", 1000)`
   - `service_name: str = os.getenv("SERVICE_NAME", "dev")`
   
   Keep every existing default, including the Unix-socket `DATABASE_URL`. Compose overrides it.
-- [ ] T007 [P] Move `app/models.py` to `packages/checkout_data/src/checkout_data/models.py` and `app/money.py` to `packages/checkout_data/src/checkout_data/money.py`, verbatim. Don't move `app/schemas.py`: nothing imports it.
-- [ ] T008 Move `app/db/__init__.py` to `packages/checkout_data/src/checkout_data/__init__.py`, keeping `engine`, `SessionLocal`, `get_session`, `advisory_lock`, `dispose_engine` and `POPULAR_RECOMPUTE_LOCK = 0x5C40_0001`, with imports from `checkout_data.config`. Add:
+- [X] T007 [P] Move `app/models.py` to `packages/checkout_data/src/checkout_data/models.py` and `app/money.py` to `packages/checkout_data/src/checkout_data/money.py`, verbatim. Don't move `app/schemas.py`: nothing imports it.
+- [X] T008 Move `app/db/__init__.py` to `packages/checkout_data/src/checkout_data/__init__.py`, keeping `engine`, `SessionLocal`, `get_session`, `advisory_lock`, `dispose_engine` and `POPULAR_RECOMPUTE_LOCK = 0x5C40_0001`, with imports from `checkout_data.config`. Add:
   - `async def ping() -> None` (opens a session, runs `SELECT 1`), used by every service's health probe.
   - A comment that `POPULAR_RECOMPUTE_LOCK` now marks the persistent-pipeline leader.
   
   Depends on T006.
-- [ ] T009 [P] Create `packages/checkout_data/src/checkout_data/ownership.py`.
+- [X] T009 [P] Create `packages/checkout_data/src/checkout_data/ownership.py`.
   - Define `@dataclass(frozen=True) class TableOwnership: owner: str; readers: frozenset[str]` and `SERVICES = ("catalog", "checkout", "inventory", "analytics")`.
   - Define `TABLES: dict[str, TableOwnership]` exactly as in data-model.md §1:
     - `catalog_item` owner `catalog`, readers `{catalog, checkout, inventory, analytics}`
@@ -84,34 +84,34 @@ description: "Task list for 005 service-based architecture"
     - `low_stock_alert` owner `checkout`, readers `{inventory}`
     - `popular_window_snapshot` owner `analytics`, readers `{analytics}`
   - Add a module docstring saying the seed and verify CLIs are exempt.
-- [ ] T010 [P] Create `packages/checkout_data/src/checkout_data/repos/__init__.py` (empty) and `repos/catalog.py`. `catalog.py` has `SERVICE = "catalog"` and `async def load_catalog(session) -> Sequence[Row]`, running `select(CatalogItem.sku, CatalogItem.name, CatalogItem.price_cents).order_by(CatalogItem.sku)` (the query from `app/catalog_cache.load`).
-- [ ] T011 Create `packages/checkout_data/src/checkout_data/catalog.py`, the catalog cache moved from `app/catalog_cache.py` **minus** `_items_body`/`items_body()`.
+- [X] T010 [P] Create `packages/checkout_data/src/checkout_data/repos/__init__.py` (empty) and `repos/catalog.py`. `catalog.py` has `SERVICE = "catalog"` and `async def load_catalog(session) -> Sequence[Row]`, running `select(CatalogItem.sku, CatalogItem.name, CatalogItem.price_cents).order_by(CatalogItem.sku)` (the query from `app/catalog_cache.load`).
+- [X] T011 Create `packages/checkout_data/src/checkout_data/catalog.py`, the catalog cache moved from `app/catalog_cache.py` **minus** `_items_body`/`items_body()`.
   - It keeps `_by_sku`, `async load(session) -> int` (calls `repos.catalog.load_catalog`), `get(sku)` and `name_of(sku)`.
   - It adds `rows() -> list[tuple[str, str, int]]`, returning (sku, name, price_cents) in ascending SKU order, for the catalog service to render.
   
   Depends on T010.
-- [ ] T012 [P] Move `app/db/transactions_repo.py` verbatim to `packages/checkout_data/src/checkout_data/repos/checkout.py`, adding `SERVICE = "checkout"` after the imports.
-- [ ] T013 [P] Create `packages/checkout_data/src/checkout_data/repos/inventory.py` with `SERVICE = "inventory"`. Move `_LOW_STOCK` (and its comment), `_NOW`, `low_stock_report(session, threshold)` and `now(session)` verbatim from `app/db/analytics_repo.py`.
-- [ ] T014 [P] Create `packages/checkout_data/src/checkout_data/repos/analytics.py` with `SERVICE = "analytics"`.
+- [X] T012 [P] Move `app/db/transactions_repo.py` verbatim to `packages/checkout_data/src/checkout_data/repos/checkout.py`, adding `SERVICE = "checkout"` after the imports.
+- [X] T013 [P] Create `packages/checkout_data/src/checkout_data/repos/inventory.py` with `SERVICE = "inventory"`. Move `_LOW_STOCK` (and its comment), `_NOW`, `low_stock_report(session, threshold)` and `now(session)` verbatim from `app/db/analytics_repo.py`.
+- [X] T014 [P] Create `packages/checkout_data/src/checkout_data/repos/analytics.py` with `SERVICE = "analytics"`.
   - Move `_MAX_SEQ`, `_GET_SCANS`, `_WINDOW_COUNTS`, `_UPSERT`, `_READ` and `_NOW`, plus `max_scan_seq`, `get_scans_after`, `window_counts`, `upsert_snapshot`, `read_snapshot` and `now`, from `app/db/analytics_repo.py`.
   - Change `get_scans_after`'s default `limit` from 100 to **1000**.
   - Don't move `_LOW_STOCK` or `low_stock_report`.
-- [ ] T015 Move `scripts/seed.py` to `packages/checkout_data/src/checkout_data/seed.py` with `def main(argv: list[str] | None = None) -> int` and `if __name__ == "__main__": sys.exit(main())`. Add a mutually exclusive flag `--if-empty`:
+- [X] T015 Move `scripts/seed.py` to `packages/checkout_data/src/checkout_data/seed.py` with `def main(argv: list[str] | None = None) -> int` and `if __name__ == "__main__": sys.exit(main())`. Add a mutually exclusive flag `--if-empty`:
   - Before any DDL, run `SELECT to_regclass('public.catalog_item')`.
   - If the table exists **and** `SELECT count(*) FROM catalog_item` > 0, print `catalog already seeded (<n> items); skipping` and return 0.
   - Otherwise run `Base.metadata.create_all` and seed as normal.
   
   `--reset` behavior is unchanged. Depends on T006–T008.
-- [ ] T016 [P] Move `scripts/verify_invariant.py` to `packages/checkout_data/src/checkout_data/verify_invariant.py` with a `main()` and `__main__` guard, so `python -m checkout_data.verify_invariant` works. Output and exit codes are unchanged.
-- [ ] T017 Replace `scripts/seed.py` and `scripts/verify_invariant.py` with thin shims: `from checkout_data.seed import main; sys.exit(main())`, and the same for verify. Command-line flags are identical, so `tests/conftest.py::_seed` and humans keep working. Depends on T015, T016.
-- [ ] T018 [P] Move `app/errors.py` verbatim to `packages/checkout_web/src/checkout_web/errors.py` (all codes, `ApiError`, `register_error_handlers`).
-- [ ] T019 [P] Move `app/api/_request.py` to `packages/checkout_web/src/checkout_web/request.py`, importing from `checkout_web.errors`.
-- [ ] T020 [P] Create `packages/checkout_web/src/checkout_web/health.py` with `def health_router(service: str, probe: Callable[[], Awaitable[None]]) -> APIRouter`. It provides `GET /healthz`:
+- [X] T016 [P] Move `scripts/verify_invariant.py` to `packages/checkout_data/src/checkout_data/verify_invariant.py` with a `main()` and `__main__` guard, so `python -m checkout_data.verify_invariant` works. Output and exit codes are unchanged.
+- [X] T017 Replace `scripts/seed.py` and `scripts/verify_invariant.py` with thin shims: `from checkout_data.seed import main; sys.exit(main())`, and the same for verify. Command-line flags are identical, so `tests/conftest.py::_seed` and humans keep working. Depends on T015, T016.
+- [X] T018 [P] Move `app/errors.py` verbatim to `packages/checkout_web/src/checkout_web/errors.py` (all codes, `ApiError`, `register_error_handlers`).
+- [X] T019 [P] Move `app/api/_request.py` to `packages/checkout_web/src/checkout_web/request.py`, importing from `checkout_web.errors`.
+- [X] T020 [P] Create `packages/checkout_web/src/checkout_web/health.py` with `def health_router(service: str, probe: Callable[[], Awaitable[None]]) -> APIRouter`. It provides `GET /healthz`:
   - It awaits `probe()`.
   - On success it returns `200 {"status":"ok","service":service}`.
   - On any exception it returns `503 {"error":"INTERNAL_ERROR","message":"<service> is not ready."}`.
   - No DB import: each service passes its own probe.
-- [ ] T021 Create `packages/checkout_web/src/checkout_web/app.py` with `def create_service_app(name: str, routers: list[APIRouter], probe, lifespan=None) -> FastAPI`.
+- [X] T021 Create `packages/checkout_web/src/checkout_web/app.py` with `def create_service_app(name: str, routers: list[APIRouter], probe, lifespan=None) -> FastAPI`.
   - It sets `title=f"Supermarket Self-Checkout API — {name}"`, `version="1.0.0"` and `default_response_class=ORJSONResponse`.
   - It calls `register_error_handlers(app)`, includes each router, then `health_router(name, probe)`.
   
