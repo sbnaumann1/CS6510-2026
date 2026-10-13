@@ -9,8 +9,10 @@
 #
 # Values are interpolated into compose.yaml through the same variables; the
 # defaults below apply only when this file is included.
-# A separate project name keeps the test stack's containers and volume apart
-# from the measured stack's. The two cannot run at once (both bind :8080).
+# A separate project name and separate image tags keep the test stack's
+# containers, volume and images apart from the measured stack's; sharing image
+# names made a test-stack build force the measured stack to be recreated.
+# The two stacks cannot run at once (both bind :8080).
 name: checkout-test
 
 services:
@@ -20,23 +22,31 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U checkout -d checkout_test"]
   seed:
+    image: checkout-tools:test
     environment:
       DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
       CATALOG_SIZE: "50"
       STOCK_PER_ITEM: "100"
   catalog:
+    image: checkout-catalog:test
     environment:
       DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
   checkout:
+    image: checkout-checkout:test
     environment:
       DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
   inventory:
+    image: checkout-inventory:test
     environment:
       DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
   analytics:
+    image: checkout-analytics:test
     environment:
       DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
+  gateway:
+    image: checkout-gateway:test
   tools:
+    image: checkout-tools:test
     environment:
       DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
       CATALOG_SIZE: "50"

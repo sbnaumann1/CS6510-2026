@@ -265,8 +265,8 @@ description: "Task list for 005 service-based architecture"
 
 **Independent Test**: quickstart V6. `scripts/check_independence.sh` passes (except step 5's catch-up assertion until US3), and the touch-and-rebuild check recreates only `analytics`.
 
-- [ ] T042 [P] [US2] Create `tests/unit/test_service_locks.py`. For each of the five lock files from T035, run the same `uv export` command to a temp file and assert it matches the committed file byte for byte. Skip with a reason if `uv` isn't on `PATH`.
-- [ ] T043 [US2] Create `scripts/check_independence.sh` (executable, `set -euo pipefail`; needs the stack from V1 running). For each `svc` in `analytics catalog inventory`:
+- [X] T042 [P] [US2] Create `tests/unit/test_service_locks.py`. For each of the five lock files from T035, run the same `uv export` command to a temp file and assert it matches the committed file byte for byte. Skip with a reason if `uv` isn't on `PATH`.
+- [X] T043 [US2] Create `scripts/check_independence.sh` (executable, `set -euo pipefail`; needs the stack from V1 running). For each `svc` in `analytics catalog inventory`:
   1. `docker compose stop $svc`.
   2. Assert the other routes still succeed through `:8080`:
      - `GET /items` returns 200 (unless svc=catalog).
@@ -279,7 +279,7 @@ description: "Task list for 005 service-based architecture"
   7. Print `PASS <svc>`. Exit non-zero on the first failure, printing the response.
   
   Depends on T040.
-- [ ] T044 [US2] Validate the rebuild independence part of quickstart V6:
+- [X] T044 [US2] Validate the rebuild independence part of quickstart V6:
   - Record `docker compose ps --format '{{.Service}} {{.CreatedAt}}'`, then `touch services/analytics/src/analytics_service/api.py && docker compose up -d --build --wait`.
   - Assert only `analytics` has a new CreatedAt.
   - If other services were recreated, fix their Dockerfile `COPY` scope (research R3) and re-run.

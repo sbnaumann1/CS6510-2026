@@ -100,10 +100,15 @@ What the script does and asserts:
 Then, to check that a rebuild stays independent (US2 scenario 3):
 
 ```bash
-touch services/analytics/src/analytics_service/api.py
-docker compose up -d --build --wait
-docker compose ps --format '{{.Service}} {{.CreatedAt}}'   # only analytics was recreated
+echo "# probe" >> services/analytics/src/analytics_service/api.py   # a real content change:
+docker compose up -d --build --wait                                 # Docker caches by content, so `touch` rebuilds nothing
+docker compose ps --format '{{.Service}} {{.CreatedAt}}'            # only analytics was recreated
+git checkout services/analytics/src/analytics_service/api.py && docker compose up -d --build --wait
 ```
+
+Verified 2026-10-13: only `analytics` was recreated. Image IDs change on every build
+(BuildKit provenance metadata), but compose recreates a container only when its image
+content changes.
 
 ## V7. The graded load runs (FR-017, SC-002, SC-006)
 
