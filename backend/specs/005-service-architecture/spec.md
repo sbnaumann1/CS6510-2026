@@ -25,7 +25,7 @@ reasoned about.
 | **Catalog Service** | What can be sold, and at what price | `GET /items` | — |
 | **Checkout Service** | Running a customer's basket from start to payment | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | Abandoned-transaction sweep; low-stock alert emission at completion |
 | **Inventory Service** | Reporting stock levels that need attention | `GET /inventory/low-stock` | — |
-| **Analytics Service** | Understanding customer buying behavior | `GET /analytics/popular-items` | Popular-items window computation (the spec 004 streaming pipeline) and its scheduling |
+| **Analytics Service** | Understanding customer buying behavior | `GET /analytics/popular-items` | Popular-items window computation: one persistent streaming pipeline that ingests scans continuously and slides the window internally |
 
 A **Gateway** (edge router) sits in front of the four services on the single
 public address the load client targets. It forwards each request by path to
@@ -42,6 +42,7 @@ services are coupled.
 ### Session 2026-10-13
 
 - Q: How should the "start everything" command work? → A: Docker Compose only, run with Docker (`docker compose`, via Docker Desktop). Podman was briefly chosen, then replaced by plain Docker. Every domain service and the Gateway is its own container image. The centralized database and the seed step also run as compose services. All measured load runs go against this compose stack. There is no separate native-process launch path.
+- Q: Should Analytics start a new pipeline run every 500 scans? → A: No. Analytics runs **one persistent streaming pipeline** for its whole lifetime. The pipeline continuously ingests new scans from the shared scan record as they are committed, and manages the 1 000-scan window and the 500-scan slide internally. It publishes a snapshot each time the window slides. Nothing re-creates or re-triggers the pipeline per slide.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -150,8 +151,11 @@ as their base URL, and show the stated station count and duration.
 
 - **A service is down**: the Gateway returns a gateway-unavailable error for that service's routes only. Other routes are unaffected. The load client will count these as errors, so measured runs require every unit to be healthy before they start.
 - **Analytics starts before any scans exist**: it serves the same empty-window response as today and begins computing once scans appear.
-- **Analytics restarts mid-run**: its in-memory window is rebuilt from the most recent scans in the shared database. It never fabricates a window from partial memory.
-- **Several Analytics instances run at once**: at most one computes and publishes a given window at a time, through database-level mutual exclusion (as today). The others skip.
+- **Analytics restarts mid-run**: the persistent pipeline is lost with the process. On start, a new pipeline backfills its window from the scans just before the latest slide boundary in the shared database, then continues live. It never fabricates a window from partial memory.
+- **Several Analytics instances run at once**: exactly one instance runs the pipeline at a time, holding a database-level lock for as long as it runs. The others stand by and take over if the leader's lock is released (for example, the leader stops).
+- **Scans commit out of order**: concurrent checkouts can commit a higher scan sequence number before a lower one. The pipeline must not permanently skip a lower-numbered scan that commits slightly later. A sequence number that never appears (for example, a rolled-back insert) must not stall the pipeline either.
+- **The pipeline falls behind under a burst**: it catches up in order, without losing scans. When several windows are ready at once it may publish only the newest, because clients only ever see the latest snapshot.
+- **The pipeline hits an error**: the error is logged, and the pipeline rebuilds itself from the database (as on restart) instead of exiting the service.
 - **Several Checkout instances run at once**: completion stays correct because stock locking is enforced by the database, not by in-process state. The abandoned-transaction sweep stays idempotent.
 - **Catalog data is read by Checkout and Catalog independently**: both read the same immutable-during-a-run catalog rows, so their views cannot diverge during a run. Re-seeding requires restarting both.
 - **Re-seeding while services are running**: not supported (unchanged from today). Re-seeding happens only by bringing the stack down and up again. The seed step runs once per `up`, and domain services do not start until it has completed successfully.
@@ -184,9 +188,11 @@ as their base URL, and show the stated station count and duration.
 - **FR-010**: All services MUST connect to one centralized database instance and schema, which runs as a single compose service. No service may own a private database.
 - **FR-011**: The Shared Data Access library MUST declare, for every table, its single owning (writing) service and the services allowed to read it. Write access to a table outside its owner is a boundary violation that the boundary check detects.
 - **FR-012**: The Analytics Service MUST detect new scans by observing the shared scan record, with no notification from Checkout, and MUST publish an updated popular-items window no later than 2 seconds after a slide boundary is crossed under default load.
+- **FR-012a**: The popular-items computation MUST be a single long-running streaming pipeline per Analytics leader. Its filters run for the lifetime of the pipeline and are connected by bounded queues. Scans enter as they are observed. Window membership (the latest 1 000 scans, sliding every 500) and per-SKU counts are maintained incrementally inside the pipeline, not recomputed from scratch per slide. No component may start a new pipeline run per slide.
+- **FR-012b**: Each published window MUST contain exactly the scans whose sequence numbers fall in that window, with counts equal to a direct count over the shared scan record for the same bounds. Ties MUST be ranked by SKU ascending, matching the on-demand computation.
 - **FR-013**: The Checkout Service MUST obtain item names and prices for scanning by reading catalog data from the shared database (it may cache it at startup, as today). It MUST NOT obtain them from the Catalog Service.
 - **FR-014**: The Inventory Service MUST compute the low-stock report from stock and alert data in the shared database. It MUST NOT obtain it from the Checkout Service.
-- **FR-015**: Mutual exclusion that today relies on database locks (stock locking during completion, single-writer window recompute) MUST continue to rely on the database, so it stays correct when a service runs as several processes.
+- **FR-015**: Mutual exclusion that today relies on database locks (stock locking during completion, a single pipeline leader publishing windows) MUST continue to rely on the database, so it stays correct when a service runs as several processes.
 
 **Verification and deliverables**
 
@@ -229,7 +235,7 @@ Entities are unchanged from spec 001. What is new is **ownership**:
 - **Seeding is an operator tool, not a service**: the seed script writes catalog and stock directly. It runs before services start and is not a deployable service.
 - **Container-per-service on one host, via Docker**: "deployable unit" is met by each service having its own container image and compose entry. The whole system, database included, runs under `docker compose` on the developer's machine. This deliberately departs from research R3 of 001, where measured runs used a native database. Results are therefore not directly comparable to weeks 1–4, and the README must say so next to the reports.
 - **Docker Desktop is already installed** on the development machine (Docker 28, Compose v2). The README documents starting it before `docker compose up`. Docker Desktop's VM CPU and memory allocation must be sized for the stress run, and the plan sets the recommended values.
-- **The streaming pipeline from spec 004 moves intact into the Analytics Service**: only its trigger changes, from an in-process call on scan to database-observed scan progress.
+- **The spec 004 pipeline is reworked into a persistent pipeline in the Analytics Service**. It keeps spec 004's filter decomposition (ingest → window → aggregation → ranking → output, connected by queues). It changes from one short-lived run per slide (triggered in-process by the scan route) to one pipeline that runs continuously, tails the shared scan record, and slides the window itself.
 - **Worker counts per service are a tuning choice** made during planning, set through compose environment variables. The total database connections across all services must stay within the database container's configured connection limit.
 - **Reports location**: reports are committed under the load client's reports directory, in a subfolder named for spec 005, so earlier weeks' reports stay distinguishable.
 

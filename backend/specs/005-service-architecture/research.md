@@ -21,7 +21,7 @@ native PostgreSQL over a Unix socket:
 - **Catalog**: `GET /items`.
 - **Checkout**: the four `/transactions…` operations, plus the abandoned-transaction sweeper and low-stock alert emission.
 - **Inventory**: `GET /inventory/low-stock`.
-- **Analytics**: `GET /analytics/popular-items`, plus the popular-window poller and the spec 004 streaming pipeline.
+- **Analytics**: `GET /analytics/popular-items`, plus the persistent popular-items streaming pipeline (R5).
 
 Each table has exactly one writing owner (data-model.md §1):
 - Checkout owns `transaction`, `transaction_item`, `inventory_stock` and `low_stock_alert`.
@@ -48,7 +48,7 @@ Each table has exactly one writing owner (data-model.md §1):
 | `catalog-service` / `catalog_service` | service | app, router |
 | `checkout-service` / `checkout_service` | service | app, router, business logic, alerts, sweeper |
 | `inventory-service` / `inventory_service` | service | app, router, low-stock report |
-| `analytics-service` / `analytics_service` | service | app, router, read path, pipeline, poller |
+| `analytics-service` / `analytics_service` | service | app, router, read path, persistent pipeline (filters), pipeline supervisor |
 
 Both shared packages carry an explicit version (`0.5.0`). Each service image installs them as regular (non-editable) packages, so the shared library is literally *distributed* into each deployable unit.
 
@@ -98,31 +98,89 @@ Key settings:
 - *Traefik / Caddy / HAProxy*: all viable. Traefik's label-driven config spreads routing across the compose file; HAProxy and Caddy offer nothing extra here. nginx wins on familiarity and a single readable config file.
 - *No gateway (load client points at Checkout, which proxies the rest)*: makes Checkout talk to other services directly. Rejected.
 
-## R5. Analytics trigger: poll the shared scan sequence
+## R5. Analytics: one persistent streaming pipeline that tails the scan record
 
-**Decision**: The Analytics Service runs one background poller per process, started in its lifespan. Every `POPULAR_POLL_MS` (default 250 ms) it reads `max(transaction_item.id)`, an index-only read on the primary key. It computes the latest slide boundary `b = max − (max mod 500)`. If `b` is greater than the last published `window_end`, it takes `pg_try_advisory_lock(POPULAR_RECOMPUTE_LOCK)` and runs the spec 004 streaming pipeline unchanged for the window `(b − 1000, b]`, then records `b`. On startup it seeds its last published value from `popular_window_snapshot.window_end` (0 if absent), so a restart catches up on its first tick (US2 scenario 2).
+**Decision**: The Analytics Service runs **one long-lived pipeline** for the life of the
+process, started in its lifespan. It keeps spec 004's five filters and their queue
+connections. Every filter is a `while True` loop that only exits on shutdown. There is no
+per-slide run, no `asyncio.gather` per window, and no `TERMINATE` between windows.
 
-The in-process `should_recompute()` / `BackgroundTasks` hook in the scan route is **deleted**.
+```text
+TailIngest ──q1──▶ WindowFilter ──q2──▶ AggregationFilter ──q3──▶ RankingFilter ──q4──▶ OutputFilter
+ (DB tail)          (deque, slide)       (incremental Counter)      (top-200, ties by sku)   (latest-wins, commit per window)
+```
+
+| Filter | Spec 004 behavior (per run) | 005 behavior (persistent) |
+| --- | --- | --- |
+| **TailIngest** (was IngestFilter) | read a fixed range `(end−1000, end]` once, then `TERMINATE` | Loop forever: `get_scans_after(last_id, limit=1000)`, emit `ScanData` in id order, advance `last_id` with the gap rule (R6). Sleep `POPULAR_POLL_MS` (100 ms) only when a batch comes back empty or short. A full batch loops immediately, so a backlog drains at DB speed. |
+| **WindowFilter** | buffer up to 1000, emit every 500 *received* | Window is defined by **scan id**, not arrival count. It keeps `deque` entries with `id > b − 1000`. When ingest passes the next boundary `b` (a multiple of 500; signalled by a `Watermark(b)` item, R6), it evicts ids `≤ b − 1000` and emits a `Slide(b, added, evicted)` delta. |
+| **AggregationFilter** | `Counter` over all 1000 scans per window | Maintains **one** running `Counter`. Each `Slide` applies `+1` per added scan and `−1` per evicted one (dropping zeros), then emits `WindowCounts(start=b−1000, end=b, counts)`. That is O(500) work per slide instead of O(1000). |
+| **RankingFilter** | collect, sort by count only | Sort by `(−count, sku)` (FR-012b; same order as `window_counts` SQL), take the top 200, emit `RankedData`. |
+| **OutputFilter** | one upsert, commit only at `TERMINATE` | **Commit per window** (a persistent pipeline never reaches `TERMINATE`). Its input `q4` is **latest-wins**: a size-1 slot where a newer window replaces an unwritten older one. A burst of slides then costs one DB write, not a backlog (spec edge case). |
+
+Queues `q1`–`q3` are bounded (`maxsize` 10 000 / 64 / 64), so a slow downstream filter
+back-pressures the tail instead of growing memory. Window state is about 1 000 `ScanData`
+plus at most 2 000 counter entries.
+
+**Bootstrap / restart**: on start, the pipeline reads `max_seq`, sets
+`b₀ = max_seq − (max_seq mod 500)`, and starts the tail at `last_id = max(0, b₀ − 1000)`. The
+backfill is therefore the same tail code, not a special path. The first emitted window is
+`b₀`, followed by live windows. Below the first boundary, the existing on-demand read path
+answers (unchanged).
+
+**Leadership (FR-015)**: the pipeline runs only while its process holds the session-level
+advisory lock `POPULAR_RECOMPUTE_LOCK` on a dedicated connection. A process that fails to get
+it retries every 2 s as a standby. If the leader dies, PostgreSQL releases the lock with
+the connection, and a standby bootstraps as above. With the planned one Analytics replica,
+the lock is simply always held.
+
+**Supervision**: a supervisor task wraps the pipeline. Any filter exception is logged,
+the whole pipeline is cancelled (all filters), and it re-bootstraps after a 1 s back-off. A
+broken pipeline therefore never sits half-alive, and the service stays up (004 FR11).
+
+**Observability (004 FR9 kept)**: the supervisor logs `pipeline started bootstrap_from=<id>` once per bootstrap and `pipeline restarting after error`. OutputFilter logs `window published start=<s> end=<e>` at info level. The quickstart (V5) greps these exact phrases. The Analytics service sets its own logger to INFO, independently of uvicorn's `--log-level warning`.
+
+**Shutdown**: lifespan exit puts `TERMINATE` into `q1`. Filters forward it and exit, and the
+lock connection is closed.
 
 **Rationale**:
-- The poller satisfies FR-012: there is no notification from Checkout, only an observation of data Checkout already writes.
-- Worst-case staleness is one poll interval plus one pipeline run. The pipeline does ten 100-row batches plus one upsert, typically tens of milliseconds. That is well inside the 2 s bound (SC-005).
-- Cost is ~4 trivial queries per second, independent of load.
-- At stress rates (~9 000 scans/s), several boundaries pass per tick. Computing only the latest is the same effective behavior as today, where the advisory lock already makes overlapping triggers skip.
+- This is what the user asked for: one pipeline that accepts scans as they arrive and owns the windowing. It is also the purer pipes-and-filters design. Each filter keeps state across windows, which spec 004's run-per-slide design couldn't do (its filters were rebuilt from scratch every 500 scans).
+- Detection still satisfies FR-012: Analytics observes rows that Checkout already writes, and Checkout never knows Analytics exists.
+- **Freshness**: one poll interval (≤ 100 ms) plus one slide through four in-memory filters plus one upsert. That's tens of milliseconds, well inside the 2 s bound (SC-005).
+- **DB cost**: about 10 trivial queries/s when idle. Under stress (~9 000 scans/s) it's about 9 batched reads/s of ≤ 1 000 rows, plus at most one snapshot upsert per output cycle.
 
 **Alternatives considered**:
-- *PostgreSQL `LISTEN/NOTIFY` issued by Checkout on each boundary*: lower latency. But Checkout would then have to know that a consumer exists and which channel it listens on. That is messaging between services routed through the database, which the spec rules out of scope.
-- *A database trigger on `transaction_item` that sends `NOTIFY`*: hides the coupling inside the schema, and adds work to the hottest insert.
-- *Checkout calls Analytics over HTTP*: forbidden by FR-009.
-- *Recompute on read*: puts a 1 000-row aggregation on the read path, and isn't the spec 004 pipeline.
+- *Keep spec 004's run-per-slide pipeline, triggered by a poller*: this was the previous plan. Rejected by the 2026-10-13 clarification, because it rebuilds the window from the DB every 500 scans and the "pipeline" never persists.
+- *`LISTEN/NOTIFY` push from Checkout instead of a tail*: lower idle cost, but Checkout would have to know a consumer exists (out of scope, spec), and NOTIFY payloads are lost while Analytics is down. The tail recovers from the table itself.
+- *Logical replication / CDC (wal2json, Debezium)*: a true change stream, but it needs a replication slot, WAL configuration and a new dependency for a one-table tail. It's the right move at larger scale, and overkill here.
+- *Window by arrival count (spec 004 WindowFilter)*: on restart, the arrival order differs from the id order, so windows wouldn't be reproducible. Windowing by id makes every published window equal to a direct SQL count over the same bounds (FR-012b), which is testable.
 
-## R6. Window end = the slide boundary, not "max at run time"
+## R6. Tailing a sequence safely: out-of-order commits and gaps
 
-**Decision**: The pipeline entry point takes an explicit `end` (the boundary `b` from R5) instead of reading `max_scan_seq` itself, so published windows end on multiples of 500.
+**Problem**: `transaction_item.id` values are allocated at insert time, but concurrent scan
+transactions commit in any order. A naive `id > last_id` tail that advances to the highest id
+seen will **permanently skip** a lower id that commits a few milliseconds later. At 100
+stations this happens constantly. Separately, some ids never appear: a sequence value
+consumed by a statement that then rolled back is a permanent gap.
 
-**Rationale**: A poller only observes boundaries after the fact, so "max at run time" would publish arbitrary end points. Using the boundary keeps the published window a true hopping window (001 spec: 1 000-item window, 500-scan slide), and makes `windowEnd − windowStart = 1000` hold exactly once past the first window. The 001 data-model note on sequence gaps still applies: ids are allocated before commit, so a few in-flight scans below `b` may be missed. That is the same tolerance the monolith had.
+**Decision**: TailIngest keeps a *contiguous watermark* `last_id` and a small *pending* set:
 
-**Alternatives considered**: *Keep max-at-run-time*. Behaviorally permitted by the contract, which only requires `windowEnd − windowStart ≤ windowSize`, but less faithful and less testable.
+1. Each poll reads `id > last_id ORDER BY id LIMIT 1000`.
+2. Rows are accepted in order while `id == last_id + 1`, and `last_id` advances.
+3. At the first hole (`id > last_id + 1`), rows above the hole are held in *pending*, and the hole's first-seen time is recorded.
+4. The next poll re-reads from `last_id`. If the hole has filled, it continues contiguously.
+5. If a hole stays unfilled for longer than `POPULAR_GAP_GRACE_MS` (default 1 000 ms), it is declared a permanent gap. The tail logs it at debug level, skips it, and proceeds.
+6. After accepting rows, TailIngest emits `Watermark(b)` for every boundary `b` (a multiple of 500) with `b ≤ last_id` that hasn't been emitted yet. WindowFilter slides only on a watermark, so a window is emitted only once every id inside it has either arrived or been declared a gap.
+
+**Rationale**:
+- A scan commits within milliseconds of getting its id: the scan CTE is one statement in its own transaction. So 1 s of grace is several hundred times the expected delay. In practice it catches every late commit, at a worst-case freshness cost of 1 s (still inside SC-005's 2 s).
+- Permanent gaps are rare. The scan CTE only consumes an id when the insert actually happens, so a gap needs a crash or rollback after the insert. They cost at most one grace period each.
+- Window contents then exactly match `SELECT … WHERE id > b−1000 AND id <= b` evaluated after the fact (FR-012b). The integration test checks exactly that.
+
+**Alternatives considered**:
+- *Tail by `max(id)` minus a fixed lag (e.g. "only read ids ≤ max − 200")*: under load the lag is too small; when idle it delays the last scans forever.
+- *Tail by a commit timestamp column*: needs a schema change (the schema is frozen by 001), and clock ties need their own tie-break anyway.
+- *`txid_snapshot_xmin`-based visibility tracking*: correct, but much more subtle than a grace window for the same result here.
 
 ## R7. Compose topology, startup ordering, health
 
@@ -158,7 +216,7 @@ Ordering:
 | seed / tools | — | — | ≤ 2 |
 | **Total** | | | **≤ 75 of 200** |
 
-**Rationale**: TCP between containers is the honest "distributed services" topology, and stays inside the Docker Desktop VM. Checkout is the only hot path, so it gets the workers. Analytics runs one worker so exactly one poller exists per container. The advisory lock still makes extra replicas safe (FR-015).
+**Rationale**: TCP between containers is the honest "distributed services" topology, and stays inside the Docker Desktop VM. Checkout is the only hot path, so it gets the workers. Analytics runs one worker so exactly one pipeline candidate exists per container; the leader lock (R5) decides which candidate runs. The advisory lock still makes extra replicas safe (FR-015).
 
 **Alternatives considered**: *Share the PostgreSQL Unix socket through a named volume mounted into every container*. It brings back 001 R3's no-TCP hot path and is a valid tuning lever if SC-006 falls short. It isn't the default because it ties all services to one host's filesystem.
 
@@ -190,8 +248,17 @@ Both are visible in the numbers, and the README will name them rather than hide 
 1. **In-process (default, `uv run pytest`)**: `tests/conftest.py` builds a test-only ASGI dispatcher. It mounts the four services' `create_app()` instances behind the same path table as `gateway/nginx.conf`. Contract and integration tests keep their assertions unchanged. Only their imports change, from `app.*` to the new packages. A unit test parses `nginx.conf` and asserts that its `location` table matches the dispatcher's, so the two cannot drift.
 2. **Gateway mode (`GATEWAY_URL=http://localhost:8080 uv run pytest tests/contract`)**: the same contract tests run over real HTTP against the compose stack. The stack is started with the `compose.test.yaml` override, which sets `POSTGRES_DB=checkout_test`, `CATALOG_SIZE=50` and `STOCK_PER_ITEM=100`. The DB-reset fixture connects through `127.0.0.1:5433`. This is the check for SC-001.
 3. **New tests**:
-   - unit tests for the poller's boundary arithmetic;
-   - an integration test that inserts 500 scans directly through Checkout's app and asserts the poller publishes a window, with no call into Analytics;
+   - unit tests for each persistent filter fed through mock queues (004 SC3 carried over):
+     - WindowFilter slides only on `Watermark` items and evicts by id.
+     - AggregationFilter's incremental counts equal a fresh `Counter` after any sequence of slides.
+     - RankingFilter breaks ties by SKU.
+     - OutputFilter's latest-wins slot drops superseded windows and commits per window.
+   - unit tests for TailIngest's gap rule, using a fake repo that returns out-of-order and gapped id sets: a late commit inside the grace period is never skipped, and a permanent gap is skipped after the grace period;
+   - an integration test against PostgreSQL that runs the persistent pipeline as a task. It drives 1 600 scans through Checkout's app from concurrent tasks, then asserts:
+     - windows ending at 500, 1 000 and 1 500 are published, each equal to a direct `window_counts` SQL query over the same bounds (FR-012b);
+     - there were no calls into Analytics;
+     - the pipeline task is the same object throughout, so it was never restarted per slide (FR-012a);
+   - a restart test: cancel the pipeline mid-stream, start a new one, and assert it backfills and publishes the correct latest window;
    - the boundary check (R12) as a test;
    - the lock-file freshness test (R3);
    - `scripts/check_independence.sh`, which stops `analytics`, asserts Catalog and Checkout still work and popular-items returns 503 in the error shape, then restarts it and asserts recovery (US2, SC-003).

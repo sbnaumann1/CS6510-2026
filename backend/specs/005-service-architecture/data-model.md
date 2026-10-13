@@ -19,7 +19,7 @@ This is the source of truth for the boundary check (research R12). It lives in c
 | `transaction` | checkout | checkout | start, scan counters, complete, sweep | everything in `/transactions…` |
 | `transaction_item` | checkout | checkout, analytics | scan insert | basket at completion; **global scan sequence** for analytics |
 | `low_stock_alert` | checkout | inventory | alert emission at completion | `triggeredAt` in the low-stock report |
-| `popular_window_snapshot` | analytics | analytics | pipeline `OutputFilter` | popular-items read path; poller's last-published boundary |
+| `popular_window_snapshot` | analytics | analytics | persistent pipeline `OutputFilter` | popular-items read path |
 
 Notes:
 - `catalog_item` has an owner (Catalog) but no runtime writer. It is immutable during a run (001 assumption), so the services' independent caches of it cannot diverge.
@@ -65,32 +65,54 @@ Every function keeps 002's contract: one statement against the caller's session;
 
 | Function | Moved from `app/db/analytics_repo.py` | Tables |
 | --- | --- | --- |
-| `max_scan_seq` | same | `transaction_item` R |
-| `get_scans_after` | same | `transaction_item` R |
-| `window_counts` | same | `transaction_item` R |
+| `max_scan_seq` | same (used once, at pipeline bootstrap) | `transaction_item` R |
+| `get_scans_after(session, last_id, limit=1000)` | same; the default batch rises from 100 to 1 000 for the tail | `transaction_item` R |
+| `window_counts` | same (on-demand read path below the first boundary, and the test oracle for FR-012b) | `transaction_item` R |
 | `upsert_snapshot` | same | `popular_window_snapshot` W |
 | `read_snapshot` | same | `popular_window_snapshot` R |
-| `last_published_end(session) -> int` | **new**, `SELECT coalesce(max(window_end),0) FROM popular_window_snapshot` | `popular_window_snapshot` R |
 | `now(session)` | same | none |
 
 ### Shared primitives (`checkout_data/__init__` / `db.py`)
 
-`engine`, `SessionLocal`, `get_session`, `advisory_lock`, `dispose_engine` and `POPULAR_RECOMPUTE_LOCK` are unchanged from `app/db/__init__.py`. Pool size comes from each service's own `DB_POOL_SIZE`.
+`engine`, `SessionLocal`, `get_session`, `advisory_lock`, `dispose_engine` and `POPULAR_RECOMPUTE_LOCK` are unchanged from `app/db/__init__.py`. The lock now marks the **pipeline leader** rather than a single recompute. Pool size comes from each service's own `DB_POOL_SIZE`.
 
-## 3. Analytics poller state (in memory, per Analytics process)
+## 3. Persistent pipeline state (in memory, Analytics leader only)
 
-| Field | Type | Initial value | Meaning |
+Design: [research.md R5–R6](./research.md). The state lives across windows for the whole
+life of the pipeline.
+
+### Items flowing between filters
+
+| Item | Producer → consumer | Fields |
+| --- | --- | --- |
+| `ScanData` | TailIngest → WindowFilter | `scan_id: int`, `sku: str` (unchanged from 004) |
+| `Watermark` | TailIngest → WindowFilter | `boundary: int`, a multiple of `slide`: every id ≤ boundary has arrived or been declared a gap |
+| `Slide` | WindowFilter → AggregationFilter | `window_start`, `window_end`, `added: list[str]`, `evicted: list[str]` (SKUs) |
+| `WindowCounts` | AggregationFilter → RankingFilter | `window_start`, `window_end`, `counts: dict[str, int]` (a snapshot copy) |
+| `RankedData` | RankingFilter → OutputFilter | unchanged from 004; ranking ordered by `(−scanCount, sku)`, top 200 |
+| `TERMINATE` | lifespan → TailIngest → … | shutdown only, never between windows |
+
+### Per-filter state
+
+| Filter | State | Initial value (bootstrap) | Invariant |
 | --- | --- | --- | --- |
-| `last_end` | int | `last_published_end()` at startup | `window_end` of the most recent snapshot this process knows is published |
-| `poll_interval` | seconds | `POPULAR_POLL_MS / 1000` (0.25) | sleep between ticks |
+| TailIngest | `last_id` (contiguous watermark), `pending: dict[id, sku]`, `hole_since: float \| None`, `next_boundary` | `last_id = max(0, b₀ − window)` where `b₀ = max_seq − max_seq mod slide`; `next_boundary = last_id + slide` rounded up to a multiple of `slide` | every id ≤ `last_id` has been emitted exactly once or declared a gap |
+| WindowFilter | `buffer: deque[ScanData]` | empty | holds exactly the arrived ids in `(last_boundary − window, last_id]` |
+| AggregationFilter | `counts: Counter[str]` | empty | equals `Counter(s.sku for s in buffer if id in (b − window, b])` after each `Slide(b)` |
+| RankingFilter | none | — | — |
+| OutputFilter | `slot` (latest-wins, size 1), `last_written_end` | `None`, 0 | writes are monotone in `window_end` |
 
-Per tick:
-1. `max_seq ← max_scan_seq()`.
-2. `b ← max_seq − (max_seq mod slide)`.
-3. If `b ≥ slide` and `b > last_end`, try the advisory lock. If it's acquired, run the pipeline for `(max(0, b − window), b]`, then `last_end ← b`. If it's held elsewhere, skip; the next tick re-reads.
-4. If `b ≤ last_end`, refresh `last_end` from the snapshot every 20 ticks. This covers another replica having published.
+### Lifecycle
 
-State transitions: `starting → polling ⇄ computing → polling`. A failure in `computing` is logged and returns to `polling`, and `last_end` doesn't advance (004 FR11). There is no state that requires Checkout.
+`standby` (no leader lock) → `bootstrapping` (backfill from `b₀ − window`) → `streaming`
+(live tail). There are two other transitions:
+- **Error**: any filter exception goes to `restarting`, where all filters are cancelled, then a 1 s back-off, then `bootstrapping`.
+- **Shutdown**: `TERMINATE` drains the filters, then `stopped`.
+
+There is no per-slide state transition: windows are emitted while in `streaming`. No state
+requires Checkout.
+
+Each persistent filter must remain unit-testable with mock queues, as in 004 SC3.
 
 ## 4. Configuration per service (environment)
 
@@ -105,7 +127,8 @@ The variables from 001 are unchanged. The new ones are marked ★.
 | `LOW_STOCK_THRESHOLD` | | ✓ | ✓ | | | 50 |
 | `TX_ABANDON_MINUTES` | | ✓ | | | | 5 |
 | `POPULAR_WINDOW_SIZE` / `POPULAR_SLIDE_INTERVAL` | | | | ✓ | | 1000 / 500 |
-| ★ `POPULAR_POLL_MS` | | | | ✓ | | 250 |
+| ★ `POPULAR_POLL_MS` (tail idle sleep) | | | | ✓ | | 100 |
+| ★ `POPULAR_GAP_GRACE_MS` (hole wait before skipping) | | | | ✓ | | 1000 |
 | ★ `SERVICE_NAME` | ✓ | ✓ | ✓ | ✓ | | baked into each image; used by `/healthz` and logs |
 
 No service receives another service's hostname or port (R12, rule 6).

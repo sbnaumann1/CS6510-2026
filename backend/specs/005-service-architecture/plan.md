@@ -19,9 +19,14 @@ registry**, and **one repository module per consuming service**. An AST-based
 database access.
 
 The one cross-domain runtime trigger left in the monolith goes away. Today a scan schedules
-the analytics recompute in-process. Instead, Analytics **polls the scan sequence** in the
-shared database every 250 ms and runs the unchanged spec 004 streaming pipeline at each new
-slide boundary.
+the analytics recompute in-process, which starts a brand-new pipeline run every 500 scans.
+Instead, Analytics runs **one persistent streaming pipeline** for its whole lifetime. That
+pipeline keeps spec 004's five filters and their queues. **Tail ingest** follows the shared
+scan record as rows commit, using a contiguous watermark with a 1 s grace for out-of-order
+commits. The **window filter** slides by scan id every 500. **Aggregation** keeps an
+incremental per-SKU count, **ranking** breaks ties by SKU, and **output** commits each window
+through a latest-wins slot. One leader holds the pipeline via a PostgreSQL advisory lock,
+and a supervisor rebuilds the pipeline from the database after any error or restart.
 
 The external contract, error catalog and graded invariant are unchanged. The two graded
 load-client reports are produced by `scripts/run_load_tests.sh` against a fresh compose
@@ -76,7 +81,7 @@ The same default engineering gates used by 002 apply in its place:
 | --- | --- | --- |
 | **Contract-first**: the frozen OpenAPI contract and error catalog are not changed to make the refactor easier | PASS | PASS. The gateway forwards unchanged, its default route preserves FastAPI's 404 body, and its outage body uses the existing `ApiError` shape ([gateway-routes.md](./contracts/gateway-routes.md)) |
 | **Correctness invariant preserved**: the completion sequence stays one DB transaction | PASS | PASS. Stock decrement and alert insert stay in Checkout (research R1), and locks stay in the database (FR-015) |
-| **No direct service coupling**: the assignment's rule | PASS | PASS. Polling replaces the in-process trigger (R5), and seven boundary rules are enforced by test (R12) |
+| **No direct service coupling**: the assignment's rule | PASS | PASS. A persistent pipeline tailing the scan record replaces the in-process trigger (R5), and seven boundary rules are enforced by test (R12) |
 | **Simplicity / YAGNI**: no machinery the assignment didn't ask for | PASS | PASS with justified additions (see Complexity Tracking). No message broker, no service discovery, no per-service DB roles |
 | **Measurable**: every success criterion has a runnable check | PASS | PASS. Each SC maps to a quickstart step V1–V7 |
 
@@ -89,7 +94,7 @@ specs/005-service-architecture/
 ├── spec.md
 ├── plan.md                         # this file
 ├── research.md                     # Phase 0: R1–R14
-├── data-model.md                   # Phase 1: ownership registry, repo moves, poller state, config
+├── data-model.md                   # Phase 1: ownership registry, repo moves, persistent pipeline state, config
 ├── quickstart.md                   # Phase 1: V1–V8 validation guide
 ├── contracts/
 │   ├── gateway-routes.md           # route table + outage behavior
@@ -132,7 +137,9 @@ backend/
 │   ├── catalog/    {pyproject.toml, requirements.lock, Dockerfile, src/catalog_service/{main,api}.py}
 │   ├── checkout/   {…, src/checkout_service/{main,api,service,alerts,sweeper}.py}
 │   ├── inventory/  {…, src/inventory_service/{main,api,low_stock}.py}
-│   └── analytics/  {…, src/analytics_service/{main,api,popular_items,pipeline,poller}.py}
+│   └── analytics/  {…, src/analytics_service/{main,api,popular_items,pipeline,supervisor}.py}
+│                   #   pipeline.py: persistent TailIngest/Window/Aggregation/Ranking/Output filters
+│                   #   supervisor.py: leader lock, bootstrap, restart-on-error, shutdown
 ├── gateway/
 │   ├── Dockerfile                  # FROM nginx:1.27-alpine
 │   └── nginx.conf                  # contracts/gateway-routes.md
@@ -144,9 +151,11 @@ backend/
 └── tests/
     ├── conftest.py                 # in-process dispatcher + gateway mode
     ├── contract/                   # unchanged assertions; imports updated
-    ├── integration/                # + test_poller_db_trigger.py
-    └── unit/                       # + test_boundaries.py, test_gateway_routes.py,
-                                    #   test_poller_boundaries.py, test_service_locks.py
+    ├── integration/                # + test_persistent_pipeline.py (windows == SQL oracle, no restart per slide),
+                                    #   test_pipeline_restart.py (backfill after cancel)
+    └── unit/                       # + test_boundaries.py, test_gateway_routes.py, test_service_locks.py,
+                                    #   test_pipeline_filters.py (each filter via mock queues),
+                                    #   test_tail_ingest_gaps.py (late commits, permanent gaps)
 ```
 
 The old `app/` package, `run.sh`, `scripts/run_server.sh`, `scripts/seed.py`,
@@ -172,6 +181,8 @@ image too (`gateway/`). The whole system is defined by `compose.yaml`.
 | FR-009/011/016 no direct coupling, ownership, check | R2, R12 | service-boundaries, data-model §1–2 |
 | FR-010 one database | R8 | compose-topology |
 | FR-012 analytics via DB | R5, R6 | data-model §3, quickstart V5 |
+| FR-012a persistent pipeline, incremental windowing | R5 | data-model §3 (items, per-filter state, lifecycle) |
+| FR-012b exact window contents, SKU tie-break | R5, R6 | data-model §3 invariants; `test_persistent_pipeline.py` |
 | FR-013/014 Checkout/Inventory read from DB | R1, R2 | data-model §2 |
 | FR-015 DB-level mutual exclusion | R5, R8 | data-model §3 |
 | FR-017/018 reports, README | R9, R14 | quickstart V7 |
@@ -179,11 +190,12 @@ image too (`gateway/`). The whole system is defined by `compose.yaml`.
 ## Implementation order (input to /speckit-tasks)
 
 1. **Workspace and shared libraries**: create `packages/checkout_data` and `packages/checkout_web` by moving code, add `ownership.py` and `seed --if-empty`, and keep the old `app/` working temporarily by importing from them.
-2. **Services**: carve out the four service packages from `app/`, delete the scan route's recompute hook, add the Analytics poller and the pipeline's explicit `end`, and add `/healthz`.
-3. **Tests (in-process)**: update the conftest dispatcher and imports, add the poller tests, the boundary check and the route-parity test. Delete `app/` and get the suite green.
-4. **Containers**: write the Dockerfiles, the lock files, `nginx.conf`, `compose.yaml` and `compose.test.yaml`, and validate quickstart V1–V3.
-5. **Operations**: write `check_independence.sh` (V6), rewrite `run_load_tests.sh` and validate V5.
-6. **Deliverables**: run V7 for both graded reports, then update `README.md` (services list, packaging, reports, the comparability note) and `load-client/reports/README.md`.
+2. **Services**: carve out the four service packages from `app/`, delete the scan route's recompute hook and `scheduler.py`, and add `/healthz`.
+3. **Persistent pipeline**: rework `pipeline.py` into long-lived filters (R5): TailIngest with the gap rule (R6), id-based WindowFilter with watermarks, incremental AggregationFilter, ranking with the SKU tie-break, and a latest-wins OutputFilter that commits per window. Add `supervisor.py` (leader lock, bootstrap, restart, shutdown) and start it from the Analytics lifespan.
+4. **Tests (in-process)**: update the conftest dispatcher and imports, add the filter, gap, persistent-pipeline and restart tests, the boundary check and the route-parity test. Delete `app/` and get the suite green.
+5. **Containers**: write the Dockerfiles, the lock files, `nginx.conf`, `compose.yaml` and `compose.test.yaml`, and validate quickstart V1–V3.
+6. **Operations**: write `check_independence.sh` (V6), rewrite `run_load_tests.sh` and validate V5.
+7. **Deliverables**: run V7 for both graded reports, then update `README.md` (services list, packaging, reports, the comparability note) and `load-client/reports/README.md`.
 
 ## Complexity Tracking
 
@@ -193,4 +205,6 @@ image too (`gateway/`). The whole system is defined by `compose.yaml`.
 | Two shared packages, not one | Keeps the deliberate DB coupling point free of web-framework code, so "what does a schema change affect?" has a clean answer | One mixed package hides the DB coupling among unrelated helpers (R2) |
 | Per-service exported lock files | Lets one service rebuild without the others (US2 scenario 3) | `uv sync` over the whole workspace rebuilds every image on any change (R3) |
 | AST boundary check | Per-table write ownership can't be expressed as greps | 002-style greps only cover imports (R12) |
+| Gap-aware tail (watermark + 1 s grace) | Concurrent scans commit out of id order; a naive `id > last_id` tail would silently drop scans | A fixed lag fails under load and stalls when idle; CDC/logical replication is heavy for one table (R6) |
+| Pipeline supervisor + leader lock | A pipeline that never exits needs an owner for restart, and must run at most once across replicas | Run-per-slide needed neither, but it is exactly what the clarification rejected (R5) |
 | `--if-empty` seed mode | Makes it safe for compose to re-run the one-shot seed when a single service is started independently | `--reset` on every start could wipe a live database (R7) |

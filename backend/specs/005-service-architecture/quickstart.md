@@ -71,8 +71,17 @@ sleep 2
 curl -s 'localhost:8084/analytics/popular-items?limit=1'
 ```
 
-**Expect**: `windowEnd` is `500` (a slide boundary, research R6) and `SKU-000001` is rank 1
-with `scanCount` 500. Nothing in Checkout knows Analytics exists.
+**Expect**: `windowEnd` is `500` (the first slide boundary, research R5) and `SKU-000001` is
+rank 1 with `scanCount` 500. Nothing in Checkout knows Analytics exists.
+
+Then scan another 1 000 items the same way and confirm the persistent pipeline slid without
+being restarted (FR-012a):
+
+```bash
+curl -s 'localhost:8084/analytics/popular-items?limit=1'      # windowStart 500, windowEnd 1500
+docker compose logs analytics | grep -c 'pipeline started'    # 1: one pipeline for the process lifetime
+docker compose logs analytics | grep -c 'window published'    # ≥ 3 (500, 1000, 1500), all from that one pipeline
+```
 
 ## V6. Independent deployability (US2, SC-003)
 
