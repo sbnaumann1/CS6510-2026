@@ -473,7 +473,7 @@ description: "Task list for 005 service-based architecture"
   Then decide adopt or reject, with the coupling analysis written down. Update research.md R5 "Alternatives considered" with the decision. If it's adopted, stop: add a new spec clarification and the tasks first. Fill in the Outcome row.
 - [X] T069 [P] Update the repo-root docs that describe the old pipeline so they match spec 005: `../PIPELINE_ARCHITECTURE.md`, `../PIPELINE_DESCRIPTION.txt` and `../architecture.md`. Cover the persistent filters, TailIngest replacing the per-run IngestFilter, the 4 services plus gateway, and the shared `checkout-data`. Keep their structure, and change only what's now false.
 - [X] T070 [P] Remove leftovers: `server-normal.log`/`server-stress.log` if no longer referenced, any `app/` mentions in `scripts/`, and `.env.example` entries that only applied natively. Add the `POPULAR_POLL_MS`/`POPULAR_GAP_GRACE_MS` entries to `.env.example`. Confirm with `grep -rn "app\.\|run_server" scripts README.md`.
-- [ ] T071 Final validation: run quickstart **V1–V8** top to bottom on a clean stack, plus `uv run pytest -q` and `uv run python scripts/check_boundaries.py`. Confirm that every box in `checklists/pre-push-review.md` is checked and both Outcome rows are filled. Only then commit, and push the branch.
+- [X] T071 Final validation: run quickstart **V1–V8** top to bottom on a clean stack, plus `uv run pytest -q` and `uv run python scripts/check_boundaries.py`. Confirm that every box in `checklists/pre-push-review.md` is checked and both Outcome rows are filled. Only then commit, and push the branch.
 
 ---
 
