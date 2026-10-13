@@ -298,7 +298,7 @@ description: "Task list for 005 service-based architecture"
 
 ### Tests first (write them, watch them fail, then implement)
 
-- [ ] T045 [P] [US3] Create `tests/unit/test_pipeline_filters.py`. Drive each filter from `analytics_service.pipeline` with real `asyncio.Queue`s and no DB:
+- [X] T045 [P] [US3] Create `tests/unit/test_pipeline_filters.py`. Drive each filter from `analytics_service.pipeline` with real `asyncio.Queue`s and no DB:
   - **WindowFilter**:
     - Feed ScanData ids 1–1 600 and `Watermark(500)`, `Watermark(1000)`, `Watermark(1500)`. Assert three `Slide`s with `(window_start, window_end)` = (0,500), (0,1000), (500,1500).
     - Assert `added`/`evicted` contain exactly the SKUs of ids (b−500, b] and (b−1500, b−1000].
@@ -310,13 +310,13 @@ description: "Task list for 005 service-based architecture"
     - with the consumer running, each window is upserted then committed (`commit` called once per write);
     - `window published start=… end=…` is logged.
   - **TERMINATE**: putting it into the first queue makes every filter exit.
-- [ ] T046 [P] [US3] Create `tests/unit/test_tail_ingest_gaps.py`. Use a fake `get_scans_after(last_id, limit)` backed by a mutable dict of committed `id → sku`, and a fake clock or `monkeypatch` on `POPULAR_GAP_GRACE_MS` (set it to 50 ms for speed):
+- [X] T046 [P] [US3] Create `tests/unit/test_tail_ingest_gaps.py`. Use a fake `get_scans_after(last_id, limit)` backed by a mutable dict of committed `id → sku`, and a fake clock or `monkeypatch` on `POPULAR_GAP_GRACE_MS` (set it to 50 ms for speed):
   1. **Late commit**: commit ids 1, 2, 4, 5. Assert only 1 and 2 are emitted, then commit 3 within the grace period. Assert 3, 4 and 5 are emitted in order and nothing is skipped.
   2. **Permanent gap**: commit 1, 2, 4. After the grace period expires, assert 4 is emitted, `gap skipped id=3` is logged at INFO, and `last_id == 4`.
   3. **Watermarks**: with ids 1–1 000 committed, the emitted stream contains `Watermark(500)` after ScanData 500 and `Watermark(1000)` after ScanData 1000, each exactly once.
   4. **Bootstrap**: starting from `last_id = 1000` with ids 1 001–1 600 committed, the first watermark is 1500.
   5. **Backlog**: with 3 000 ids committed, the tail does not sleep between full batches. Assert the fake was called ≥ 3 times with no `asyncio.sleep` in between (monkeypatch `asyncio.sleep` to record calls).
-- [ ] T047 [P] [US3] Create `tests/integration/test_persistent_pipeline.py` against the test DB (uses `reset_db` and `client`):
+- [X] T047 [P] [US3] Create `tests/integration/test_persistent_pipeline.py` against the test DB (uses `reset_db` and `client`):
   1. Start `analytics_service.supervisor.PipelineSupervisor(on_publish=published.append)` as a task. The `on_publish` hook is defined in T055/T056.
   2. Open 8 transactions and scan 1 600 items through `client` from 8 concurrent tasks (random SKUs from the catalog), so ids commit out of order.
   3. Poll `read_snapshot` until `window_end == 1500` (timeout 10 s).
@@ -325,17 +325,17 @@ description: "Task list for 005 service-based architecture"
   6. Assert `supervisor.instances == 1` (it was never restarted per slide, FR-012a).
   7. Assert `GET /analytics/popular-items` through `client` returns `windowEnd == 1500` and `windowStart == 500`.
   8. Cancel the supervisor.
-- [ ] T048 [P] [US3] Create `tests/integration/test_pipeline_restart.py`:
+- [X] T048 [P] [US3] Create `tests/integration/test_pipeline_restart.py`:
   - Start the supervisor, scan 700 items, and wait for window 500.
   - Cancel the supervisor, scan 900 more (max id 1 600), and start a **new** supervisor.
   - Assert it logs `pipeline started bootstrap_from=500` (that is, b₀=1500 minus 1000), and publishes `window_end == 1500` with a ranking equal to the `window_counts` oracle.
-- [ ] T049 [P] [US3] Create `tests/unit/test_boundaries.py`:
+- [X] T049 [P] [US3] Create `tests/unit/test_boundaries.py`:
   - Run `scripts/check_boundaries.py`'s `check(root: Path) -> list[str]` on `backend/` and assert it returns `[]`.
   - For each of the 7 rules, write a minimal violating tree into `tmp_path` and assert `check(tmp_path)` reports that rule. For example: `services/catalog/src/catalog_service/x.py` with `import checkout_service`, or `packages/checkout_data/src/checkout_data/repos/inventory.py` with `UPDATE inventory_stock`.
 
 ### Persistent pipeline (research R5–R6, data-model §3)
 
-- [ ] T050 [US3] Rewrite `services/analytics/src/analytics_service/pipeline.py`, moved from `app/analytics/pipeline.py` and then reworked. Start with the item types from data-model §3, as frozen dataclasses:
+- [X] T050 [US3] Rewrite `services/analytics/src/analytics_service/pipeline.py`, moved from `app/analytics/pipeline.py` and then reworked. Start with the item types from data-model §3, as frozen dataclasses:
   - `ScanData(scan_id: int, sku: str)`
   - `Watermark(boundary: int)`
   - `Slide(window_start: int, window_end: int, added: list[str], evicted: list[str])`
@@ -344,7 +344,7 @@ description: "Task list for 005 service-based architecture"
   - the `TERMINATE` sentinel
   
   Read `WINDOW_SIZE` and `SLIDE_INTERVAL` from `settings.popular_window_size` / `popular_slide_interval`, keep `RANKING_DEPTH = 200`, and use logger `logging.getLogger("analytics")`.
-- [ ] T051 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `class TailIngest(session_factory, start_after: int, repo=checkout_data.repos.analytics)` with `async run(out: Queue)`. Follow research R6 exactly:
+- [X] T051 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `class TailIngest(session_factory, start_after: int, repo=checkout_data.repos.analytics)` with `async run(out: Queue)`. Follow research R6 exactly:
   - **State**: `last_id = start_after`, `pending: dict[int, str]`, `hole_since: float | None`, and `next_boundary` = the smallest multiple of SLIDE_INTERVAL > start_after.
   - **Each loop**:
     - Read `get_scans_after(session, last_id, 1000)` in a short-lived session (commit/close per read so each poll sees newly committed rows), and merge the rows into `pending`.
@@ -354,7 +354,7 @@ description: "Task list for 005 service-based architecture"
     - **Shutdown**: exit on cancellation or when `out` receives TERMINATE from the supervisor (the supervisor cancels TailIngest and pushes TERMINATE downstream).
   
   Depends on T050.
-- [ ] T052 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `WindowFilter.run(inq, outq)`:
+- [X] T052 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `WindowFilter.run(inq, outq)`:
   - Keep `buffer: deque[ScanData]`, appending each ScanData.
   - On `Watermark(b)`:
     - `added` = SKUs with id in (b−SLIDE, b];
@@ -363,15 +363,15 @@ description: "Task list for 005 service-based architecture"
   - Forward TERMINATE and return.
   
   Depends on T050.
-- [ ] T053 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `AggregationFilter.run(inq, outq)` with one persistent `Counter`. For each Slide, `+1` per added and `−1` per evicted, deleting keys that reach 0. Emit `WindowCounts(start, end, dict(counter))`. Depends on T050.
-- [ ] T054 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `RankingFilter.run(inq, outq)`: sort `counts.items()` by `(−count, sku)`, take `[:RANKING_DEPTH]`, and emit `RankedData(window_size=WINDOW_SIZE, slide_interval=SLIDE_INTERVAL, window_start, window_end, computed_at=None, ranking=[{"sku":s,"scanCount":c}…])`. `computed_at=None` means the DB `now()` is used in `upsert_snapshot`. Depends on T050.
-- [ ] T055 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `LatestSlot` (one item, with `put` replacing any unconsumed item and `get` awaiting the next) and `OutputFilter(session_factory, on_publish: Callable[[RankedData], None] | None = None).run(slot)`. `on_publish` is a test hook called after each successful commit. For each RankedData:
+- [X] T053 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `AggregationFilter.run(inq, outq)` with one persistent `Counter`. For each Slide, `+1` per added and `−1` per evicted, deleting keys that reach 0. Emit `WindowCounts(start, end, dict(counter))`. Depends on T050.
+- [X] T054 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `RankingFilter.run(inq, outq)`: sort `counts.items()` by `(−count, sku)`, take `[:RANKING_DEPTH]`, and emit `RankedData(window_size=WINDOW_SIZE, slide_interval=SLIDE_INTERVAL, window_start, window_end, computed_at=None, ranking=[{"sku":s,"scanCount":c}…])`. `computed_at=None` means the DB `now()` is used in `upsert_snapshot`. Depends on T050.
+- [X] T055 [US3] In `services/analytics/src/analytics_service/pipeline.py`, implement `LatestSlot` (one item, with `put` replacing any unconsumed item and `get` awaiting the next) and `OutputFilter(session_factory, on_publish: Callable[[RankedData], None] | None = None).run(slot)`. `on_publish` is a test hook called after each successful commit. For each RankedData:
   - in a fresh session, call `repo.upsert_snapshot(…, orjson.dumps(ranking).decode(), computed_at)`, then `commit()`;
   - log INFO `window published start=%d end=%d`;
   - skip any item whose `window_end <= last_written_end`.
   
   RankingFilter writes into the `LatestSlot` instead of a queue. Depends on T050.
-- [ ] T056 [US3] Create `services/analytics/src/analytics_service/supervisor.py` with `class PipelineSupervisor(on_publish=None)` and `async run()`. It sets `self.instances = 0` and passes `on_publish` to each OutputFilter it builds.
+- [X] T056 [US3] Create `services/analytics/src/analytics_service/supervisor.py` with `class PipelineSupervisor(on_publish=None)` and `async run()`. It sets `self.instances = 0` and passes `on_publish` to each OutputFilter it builds.
   1. **Standby**: open a dedicated `engine.connect()` and loop on `pg_try_advisory_lock(POPULAR_RECOMPUTE_LOCK)` every 2 s until acquired. Hold the connection for the leader's whole lifetime.
   2. **Bootstrap**: `max_seq = repos.analytics.max_scan_seq`, `b0 = max_seq - max_seq % SLIDE`, `start_after = max(0, b0 - WINDOW)`. Log INFO `pipeline started bootstrap_from=%d`, and increment `self.instances`, which tests read.
   3. **Build**: create `q1 = Queue(maxsize=10000)`, `q2 = Queue(maxsize=64)`, `q3 = Queue(maxsize=64)` and a `LatestSlot`, then start the five filters as tasks.
@@ -379,13 +379,13 @@ description: "Task list for 005 service-based architecture"
   5. **Shutdown**: on cancellation, cancel the filters, unlock, and close the connection.
   
   Depends on T051–T055.
-- [ ] T057 [US3] Wire `PipelineSupervisor` into `services/analytics/src/analytics_service/main.py`: the lifespan starts it as a task after the catalog loads, and cancels and awaits it on exit. Call `logging.getLogger("analytics").setLevel(logging.INFO)` with a stream handler, so INFO lines appear despite uvicorn's `--log-level warning`. Depends on T056.
-- [ ] T058 [US3] Run T045–T048 until green. Fix the pipeline code, not the tests, unless a test contradicts data-model §3.
-- [ ] T059 [US3] Delete `recompute()` from `services/analytics/src/analytics_service/popular_items.py`. In `tests/integration/test_popular_items.py`, replace each `await analytics.recompute(session)` (in `test_window_slides_past_older_scans`, `test_recompute_is_idempotent` and the test at old line ~126) with `await run_pipeline_until(end)`. `run_pipeline_until` is a helper added to `tests/conftest.py` that runs `PipelineSupervisor` until `read_snapshot().window_end >= end`, then cancels it. Keep each test's assertions and rename `test_recompute_is_idempotent` → `test_republish_is_idempotent`. Depends on T057.
+- [X] T057 [US3] Wire `PipelineSupervisor` into `services/analytics/src/analytics_service/main.py`: the lifespan starts it as a task after the catalog loads, and cancels and awaits it on exit. Call `logging.getLogger("analytics").setLevel(logging.INFO)` with a stream handler, so INFO lines appear despite uvicorn's `--log-level warning`. Depends on T056.
+- [X] T058 [US3] Run T045–T048 until green. Fix the pipeline code, not the tests, unless a test contradicts data-model §3.
+- [X] T059 [US3] Delete `recompute()` from `services/analytics/src/analytics_service/popular_items.py`. In `tests/integration/test_popular_items.py`, replace each `await analytics.recompute(session)` (in `test_window_slides_past_older_scans`, `test_recompute_is_idempotent` and the test at old line ~126) with `await run_pipeline_until(end)`. `run_pipeline_until` is a helper added to `tests/conftest.py` that runs `PipelineSupervisor` until `read_snapshot().window_end >= end`, then cancels it. Keep each test's assertions and rename `test_recompute_is_idempotent` → `test_republish_is_idempotent`. Depends on T057.
 
 ### Boundary check (research R12, contracts/service-boundaries.md)
 
-- [ ] T060 [US3] Create `scripts/check_boundaries.py` with `def check(root: Path) -> list[str]` and a `__main__` that prints violations and `0 violations (7 rules, 4 services, 6 tables)` (or exits 1). Use only `ast` and `re`. The seven rules:
+- [X] T060 [US3] Create `scripts/check_boundaries.py` with `def check(root: Path) -> list[str]` and a `__main__` that prints violations and `0 violations (7 rules, 4 services, 6 tables)` (or exits 1). Use only `ast` and `re`. The seven rules:
   1. `services/<a>/**/*.py` importing a module whose top-level name is `<b>_service` with b ≠ a.
   2. A service module importing `httpx`, `requests`, `aiohttp`, `urllib.request`, `http.client` or `socket`.
   3. A service importing `checkout_data.repos.<x>` with x ∉ {own name, `catalog`}.
@@ -399,7 +399,7 @@ description: "Task list for 005 service-based architecture"
   7. `checkout_data/**` importing `fastapi` or `checkout_web`, or containing `raise ApiError`.
   
   Depends on T009, T038.
-- [ ] T061 [US3] Validate quickstart **V4** (`uv run python scripts/check_boundaries.py` prints 0 violations) and **V5** (direct :8082 scans produce windowEnd 500 then 1500 on :8084, `pipeline started` count 1, `window published` count ≥ 3). Then run `scripts/check_independence.sh` and confirm all three `PASS` lines, including analytics catch-up step 6. Depends on T043, T049, T057, T060.
+- [X] T061 [US3] Validate quickstart **V4** (`uv run python scripts/check_boundaries.py` prints 0 violations) and **V5** (direct :8082 scans produce windowEnd 500 then 1500 on :8084, `pipeline started` count 1, `window published` count ≥ 3). Then run `scripts/check_independence.sh` and confirm all three `PASS` lines, including analytics catch-up step 6. Depends on T043, T049, T057, T060.
 
 **Checkpoint**: no service calls another, and Analytics runs one persistent pipeline fed only by the database.
 

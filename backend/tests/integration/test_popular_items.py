@@ -72,32 +72,33 @@ async def test_ties_are_broken_by_sku_for_determinism(client):
     assert [i["sku"] for i in items] == ["SKU-000007", "SKU-000008", "SKU-000009"]
 
 
-async def test_window_slides_past_older_scans(client, session):
-    """With a window of 1000, scan 1001 pushes scan 1 out (US3 scenario 1).
+async def test_window_slides_past_older_scans(client, session, run_pipeline_until):
+    """With a window of 1000, later scans push older ones out (US3 scenario 1).
 
-    Driven directly against the analytics service so the test stays fast; the
-    HTTP path over 1000+ scans is covered by the load run.
+    Scans are inserted directly so the test stays fast; the persistent pipeline
+    picks them up by tailing the scan record, exactly as it does live. Windows
+    end on slide boundaries (005 research R5), so 1500 scans give (500, 1500].
     """
     from analytics_service import popular_items as analytics
 
-    # 1200 line items: the first 300 are SKU-000001, the rest SKU-000002.
+    # 1500 line items: the first 600 are SKU-000001, the rest SKU-000002.
     tx_id = await session.scalar(
         text("INSERT INTO transaction (station_id) VALUES ('bulk') RETURNING id")
     )
     await session.execute(
         text(
             "INSERT INTO transaction_item (transaction_id, sku, unit_price_cents)"
-            " SELECT :tx, CASE WHEN g <= 300 THEN 'SKU-000001' ELSE 'SKU-000002' END, 100"
-            "   FROM generate_series(1, 1200) AS g"
+            " SELECT :tx, CASE WHEN g <= 600 THEN 'SKU-000001' ELSE 'SKU-000002' END, 100"
+            "   FROM generate_series(1, 1500) AS g"
         ),
         {"tx": tx_id},
     )
     await session.commit()
 
-    await analytics.recompute(session)
+    await run_pipeline_until(1500)
     body = await analytics.read(session, limit=10)
 
-    # The window covers the most recent 1000 scans, so only 100 of the 300
+    # The window covers the most recent 1000 scans, so only 100 of the 600
     # SKU-000001 scans remain inside it.
     assert body["windowEnd"] - body["windowStart"] == 1000
     counts = {i["sku"]: i["scanCount"] for i in body["items"]}
@@ -105,25 +106,24 @@ async def test_window_slides_past_older_scans(client, session):
     assert counts["SKU-000001"] == 100
 
 
-async def test_recompute_is_idempotent(client, session):
+async def test_republish_is_idempotent(client, session, run_pipeline_until):
+    """A restarted pipeline republishes the same window for the same scans."""
     from analytics_service import popular_items as analytics
 
-    await _scan_many(client, {"SKU-000001": 10})
-    await analytics.recompute(session)
+    await _scan_many(client, {"SKU-000001": 500})
+    await run_pipeline_until(500)
     first = await analytics.read(session, limit=10)
-    await analytics.recompute(session)
+    await run_pipeline_until(500)
     second = await analytics.read(session, limit=10)
 
     assert first["items"] == second["items"]
     assert first["windowEnd"] == second["windowEnd"]
 
 
-async def test_snapshot_is_a_single_row(client, session):
-    from analytics_service import popular_items as analytics
-
-    await _scan_many(client, {"SKU-000001": 5})
+async def test_snapshot_is_a_single_row(client, session, run_pipeline_until):
+    await _scan_many(client, {"SKU-000001": 500})
     for _ in range(3):
-        await analytics.recompute(session)
+        await run_pipeline_until(500)
 
     n = await session.scalar(text("SELECT count(*) FROM popular_window_snapshot"))
     assert n == 1

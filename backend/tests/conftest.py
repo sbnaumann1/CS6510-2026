@@ -153,6 +153,37 @@ async def client(reset_db) -> AsyncClient:
 
 
 @pytest_asyncio.fixture
+async def run_pipeline_until():
+    """Run the persistent analytics pipeline until it has published a window
+    ending at or after `end`, then stop it gracefully."""
+    import asyncio
+
+    from analytics_service.supervisor import PipelineSupervisor
+    from checkout_data.repos import analytics as analytics_repo
+
+    async def run(end: int, timeout: float = 10.0) -> None:
+        sup = PipelineSupervisor()
+        task = asyncio.create_task(sup.run())
+
+        async def published() -> None:
+            while True:
+                async with SessionLocal() as s:
+                    row = await analytics_repo.read_snapshot(s)
+                if row is not None and row.window_end >= end and sup.instances:
+                    return
+                await asyncio.sleep(0.02)
+
+        try:
+            await asyncio.wait_for(published(), timeout)
+        finally:
+            await sup.stop()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    return run
+
+
+@pytest_asyncio.fixture
 async def session():
     async with SessionLocal() as s:
         yield s

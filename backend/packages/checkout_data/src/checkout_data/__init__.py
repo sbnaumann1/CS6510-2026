@@ -48,15 +48,32 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+_TRY_LOCK = text("SELECT pg_try_advisory_lock(:k)")
+_UNLOCK = text("SELECT pg_advisory_unlock(:k)")
+
+
+async def try_advisory_lock(conn: AsyncConnection, key: int) -> bool:
+    """Try to take a session-level advisory lock on `conn`; False if held elsewhere.
+
+    Session-level: it outlives the current transaction and is released by
+    `advisory_unlock` or when the connection closes.
+    """
+    return bool(await conn.scalar(_TRY_LOCK, {"k": key}))
+
+
+async def advisory_unlock(conn: AsyncConnection, key: int) -> None:
+    await conn.execute(_UNLOCK, {"k": key})
+
+
 @asynccontextmanager
 async def advisory_lock(conn: AsyncConnection, key: int) -> AsyncIterator[bool]:
     """Try to take a session-level advisory lock; yields False if held elsewhere."""
-    got = await conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
+    got = await try_advisory_lock(conn, key)
     try:
-        yield bool(got)
+        yield got
     finally:
         if got:
-            await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+            await advisory_unlock(conn, key)
 
 
 async def ping() -> None:
