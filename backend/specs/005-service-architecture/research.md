@@ -169,7 +169,7 @@ consumed by a statement that then rolled back is a permanent gap.
 2. Rows are accepted in order while `id == last_id + 1`, and `last_id` advances.
 3. At the first hole (`id > last_id + 1`), rows above the hole are held in *pending*, and the hole's first-seen time is recorded.
 4. The next poll re-reads from `last_id`. If the hole has filled, it continues contiguously.
-5. If a hole stays unfilled for longer than `POPULAR_GAP_GRACE_MS` (default 1 000 ms), it is declared a permanent gap. The tail logs it at debug level, skips it, and proceeds.
+5. If a hole stays unfilled for longer than `POPULAR_GAP_GRACE_MS` (default 1 000 ms), it is declared a permanent gap. The tail logs `gap skipped id=<n>` at INFO, skips it, and proceeds. It's INFO, not DEBUG, so the pre-push review (`checklists/pre-push-review.md`) can count and cross-check every skipped id.
 6. After accepting rows, TailIngest emits `Watermark(b)` for every boundary `b` (a multiple of 500) with `b ≤ last_id` that hasn't been emitted yet. WindowFilter slides only on a watermark, so a window is emitted only once every id inside it has either arrived or been declared a gap.
 
 **Rationale**:
