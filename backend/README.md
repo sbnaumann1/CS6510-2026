@@ -29,9 +29,114 @@ Each domain service is its own deployable unit:
 It can be built, started, stopped or restarted alone, and when it's down only its own
 routes fail. Those failures come back as a `503` in the contract's error shape.
 
+### Infrastructure
+
+```mermaid
+flowchart LR
+    client["Load client on the host<br/>java Main (baseUrl localhost:8080)"]
+
+    subgraph stack["Docker Compose stack"]
+        direction LR
+        gw["gateway<br/>nginx, port 8080<br/>routing only"]
+
+        subgraph svcs["Domain services"]
+            direction TB
+            cat["Catalog Service<br/>GET /items"]
+            chk["Checkout Service<br/>/transactions/..."]
+            inv["Inventory Service<br/>GET /inventory/low-stock"]
+            ana["Analytics Service<br/>GET /analytics/popular-items<br/>persistent pipeline"]
+        end
+
+        db[("PostgreSQL 17<br/>one shared database")]
+        seed["seed (one-shot)<br/>seeds an empty DB"]
+        tools["tools (on demand)<br/>verify_invariant"]
+    end
+
+    client -->|"HTTP"| gw
+    gw -->|"/items"| cat
+    gw -->|"/transactions*"| chk
+    gw -->|"/inventory/*"| inv
+    gw -->|"/analytics/*"| ana
+
+    chk ==>|"writes transaction, transaction_item,<br/>inventory_stock, low_stock_alert<br/>reads catalog_item"| db
+    ana ==>|"writes popular_window_snapshot"| db
+    cat -.->|"reads catalog_item"| db
+    inv -.->|"reads inventory_stock,<br/>low_stock_alert, catalog_item"| db
+    ana -.->|"tails transaction_item,<br/>reads catalog_item"| db
+    seed ==>|"schema + catalog + stock"| db
+    tools -.->|"invariant check"| db
+```
+
+How to read it:
+- **Thick arrows** are writes. **Dotted arrows** are reads.
+- There are **no arrows between services**. Each service's only connection is to the shared
+  database, and the one place they meet is the table that one writes and another reads. For
+  example, Analytics tails the `transaction_item` rows Checkout inserts.
+- **Startup order** (compose `depends_on`): postgres becomes healthy, then `seed` runs to
+  completion, then the four services start and become healthy, then the gateway starts.
+- **Ports.** The gateway is published on `:8080`. Each service is also on `127.0.0.1:8081`–`8084`,
+  for debugging and the gateway-bypass check only. Postgres is on `127.0.0.1:5433`.
+
+Full unit, port and health-check details:
+[`contracts/compose-topology.md`](./specs/005-service-architecture/contracts/compose-topology.md).
+
+<details>
+<summary>Plain-text version</summary>
+
+```text
+host                     ┌──────────────────────── docker compose ────────────────────────┐
+                         │                                                                 │
+load client ──HTTP──▶ gateway :8080 ──/items──────────▶ Catalog ─────(reads)──────┐        │
+                         │   (nginx)  ──/transactions*──▶ Checkout ════(writes)════╡        │
+                         │            ──/inventory/*────▶ Inventory ────(reads)────┼──▶ PostgreSQL
+                         │            ──/analytics/*────▶ Analytics ═══(writes)════╡   (one shared DB)
+                         │                                  └─(tails transaction_item)┘     │
+                         │   seed (one-shot) ════════════════════════════════════════╡      │
+                         │   tools (on demand) ──────────────────────────────────────┘      │
+                         └─────────────────────────────────────────────────────────────────┘
+```
+
+</details>
+
 ## How the services share the database (and nothing else)
 
 The services' only coupling is the database, and the code for it is packaged deliberately:
+
+```mermaid
+flowchart TB
+    subgraph images["Service images"]
+        direction LR
+        cat["catalog_service"]
+        chk["checkout_service"]
+        inv["inventory_service"]
+        ana["analytics_service"]
+    end
+
+    subgraph data["checkout_data 0.5.0 (shared DB access)"]
+        direction LR
+        rcat["repos.catalog<br/>read-only, shared"]
+        rchk["repos.checkout"]
+        rinv["repos.inventory"]
+        rana["repos.analytics"]
+    end
+
+    web["checkout_web 0.5.0<br/>errors, request parsing,<br/>app factory, /healthz<br/>no DB access"]
+    own["ownership.TABLES<br/>owner + readers per table<br/>enforced on every repos module<br/>by scripts/check_boundaries.py"]
+    db[("PostgreSQL")]
+
+    cat --> rcat
+    chk --> rchk
+    chk --> rcat
+    inv --> rinv
+    ana --> rana
+    ana --> rcat
+    images --> web
+    data --> db
+    own -.- data
+```
+
+Each service imports only its own repository module, plus the shared read-only catalog
+module. All SQL lives in `checkout_data`.
 
 - **`checkout-data` 0.5.0** ([`packages/checkout_data/`](./packages/checkout_data/)) is the shared data-access library. It holds:
   - the schema (ORM models);

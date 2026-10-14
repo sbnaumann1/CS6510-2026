@@ -2,6 +2,9 @@
 
 **Feature**: `005-service-architecture` | File: `backend/compose.yaml` (+ `compose.test.yaml` override)
 
+A diagram of this topology (who routes to whom, and which service writes or reads which
+table) is in [`backend/README.md` → Infrastructure](../../../README.md#infrastructure).
+
 ## Units
 
 | Compose service | Image (build) | Role | Ports (host → container) | Depends on | Health check |
