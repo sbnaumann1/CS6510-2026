@@ -1,8 +1,10 @@
 """All four 005 service apps in one ASGI process, routed like nginx, with lifespans."""
 from contextlib import AsyncExitStack
+import pathlib
 import sys
 
-sys.path.insert(0, "/Users/sbnaumann/mscs-6510/CS6510-2026/.claude/worktrees/service-perf-investigation/backend/tests")
+# backend/tests, for the gateway route table (_dispatch.py); parents[4] is backend/.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4] / "tests"))
 from _dispatch import route  # noqa: E402
 
 from analytics_service.main import app as analytics_app  # noqa: E402

@@ -1,5 +1,7 @@
+# nginx with a per-request timing log. Relative paths resolve against backend/ (the
+# compose project directory); PERF_RUNS is exported by run_exp.sh.
 services:
   gateway:
     volumes:
-      - /Users/sbnaumann/.claude/jobs/fd6f61bd/tmp/harness/nginx-timing.conf:/etc/nginx/nginx.conf:ro
-      - /Users/sbnaumann/.claude/jobs/fd6f61bd/tmp/runs/_nginxlog:/var/log/nginx
+      - ./specs/006-service-perf-investigation/harness/nginx-timing.conf:/etc/nginx/nginx.conf:ro
+      - ${PERF_RUNS}/_nginxlog:/var/log/nginx

@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
-# Pre-005 monolith natively against host PG (unix socket), DB checkout_perf.
-# Usage: native_exp.sh NAME   env: STATIONS DURATION STOCK WORKERS DB_POOL_SIZE APPDIR
+# Run a backend natively against host PG (Unix socket /tmp), in database checkout_perf.
+# Usage: native_exp.sh NAME   env: STATIONS DURATION STOCK WORKERS DB_POOL_SIZE APPDIR APP APPDIR_FLAG
+# Default: this checkout's 005+ services in one process (composite/composite.py).
+# Pre-005 monolith: APPDIR=<its backend/> APP=app.main:app APPDIR_FLAG= (needs its own .venv).
 set -uo pipefail
 NAME=$1
-J=/Users/sbnaumann/.claude/jobs/fd6f61bd/tmp
-APPDIR=${APPDIR:-$J/pre005/backend}
-LC=/Users/sbnaumann/mscs-6510/CS6510-2026/.claude/worktrees/service-perf-investigation/load-client
-OUT=$J/runs/$NAME
+H="$(cd "$(dirname "$0")" && pwd)"
+BACK="${BACK:-$(cd "$H/../../.." && pwd)}"
+LC="${LC:-$BACK/../load-client}"
+RUNS="${PERF_RUNS:-$BACK/.perf-runs}"
+APPDIR=${APPDIR:-$BACK}
+APP=${APP:-composite:app}
+APPDIR_FLAG=${APPDIR_FLAG---app-dir $H/composite}
+OUT=$RUNS/$NAME
 STATIONS=${STATIONS:-100}; DURATION=${DURATION:-30}; STOCK=${STOCK:-2000000}
 export DATABASE_URL="postgresql+asyncpg:///checkout_perf?host=/tmp"
 export STOCK_PER_ITEM=$STOCK CATALOG_SIZE=2000 WORKERS=${WORKERS:-4} DB_POOL_SIZE=${DB_POOL_SIZE:-12}
 rm -rf "$OUT"; mkdir -p "$OUT"
-docker compose -p perf -f /Users/sbnaumann/mscs-6510/CS6510-2026/.claude/worktrees/service-perf-investigation/backend/compose.yaml down -v >/dev/null 2>&1
+docker compose -p perf -f "$BACK/compose.yaml" down -v >/dev/null 2>&1
 cd "$APPDIR"
 if lsof -ti :8090 >/dev/null 2>&1; then echo "$NAME: port 8090 busy - aborting" | tee "$OUT/summary.txt"; exit 1; fi
 .venv/bin/python scripts/seed.py --reset > "$OUT/seed.log" 2>&1 || { echo seed failed; cat "$OUT/seed.log"; exit 1; }
-.venv/bin/uvicorn ${APP:-app.main:app} ${APPDIR_FLAG:-} --host 127.0.0.1 --port 8090 --workers $WORKERS --loop uvloop --http h11 --no-access-log --log-level warning > "$OUT/server.log" 2>&1 &
+.venv/bin/uvicorn $APP $APPDIR_FLAG --host 127.0.0.1 --port 8090 --workers $WORKERS --loop uvloop --http h11 --no-access-log --log-level warning > "$OUT/server.log" 2>&1 &
 SRV=$!
 for i in $(seq 1 60); do curl -sf http://127.0.0.1:8090/items >/dev/null && break; sleep 0.5; done
 PG="postgresql:///checkout_perf?host=/tmp"
@@ -30,4 +36,4 @@ kill $SRV; sleep 3; pkill -9 -f "uvicorn .*--port 8090" 2>/dev/null; wait $SRV 2
 for p in $(lsof -ti :8090 2>/dev/null); do kill -9 $p 2>/dev/null; done
 pkill -9 -f "$APPDIR/.venv/bin/python -c from multiprocessing" 2>/dev/null
 sleep 1
-python3 $J/harness/summ.py "$OUT" | tee "$OUT/summary.txt"
+python3 "$H/summ.py" "$OUT" | tee "$OUT/summary.txt"

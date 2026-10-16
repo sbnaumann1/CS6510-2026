@@ -45,7 +45,7 @@ unless they start with `load-client/`. `H` = `specs/006-service-perf-investigati
 **Purpose**: Make the investigation harness and the graded-report script runnable from this
 checkout by anyone, and keep run output out of git.
 
-- [ ] T001 Parametrize `H/run_exp.sh`:
+- [X] T001 Parametrize `H/run_exp.sh`:
   - **Paths.** Replace the hard-coded `J`, `H`, `BACK` and `LC` with:
     - `H="$(cd "$(dirname "$0")" && pwd)"`
     - `BACK="${BACK:-$(cd "$H/../../.." && pwd)}"`
@@ -55,12 +55,12 @@ checkout by anyone, and keep run output out of git.
   - **nginx log.** Use `$RUNS/_nginxlog`, and `export PERF_RUNS="$RUNS"` before invoking
     compose so `gwlog.yaml` can interpolate it.
   - Keep all other behaviour identical (compose project `-p perf`, samplers, summaries).
-- [ ] T002 [P] Parametrize `H/native_exp.sh` the same way (`H`, `BACK`, `LC`, `RUNS`):
+- [X] T002 [P] Parametrize `H/native_exp.sh` the same way (`H`, `BACK`, `LC`, `RUNS`):
   - `APPDIR="${APPDIR:-$BACK}"`
   - the `docker compose -p perf -f "$BACK/compose.yaml" down -v` line uses `$BACK`
   - keep the port-busy guard and the worker kill loop
   - the summary call becomes `python3 "$H/summ.py"`
-- [ ] T003 [P] Make the compose overlays path-independent:
+- [X] T003 [P] Make the compose overlays path-independent:
   - **Overlay mounts.** In `H/gwlog.yaml`, `H/proto.yaml`, `H/desc.yaml` and
     `H/atomic_desc.yaml`, replace absolute host paths with paths relative to `backend/` (the
     compose project directory, because `compose.yaml` is the first `-f`). For example,
@@ -68,21 +68,21 @@ checkout by anyone, and keep run output out of git.
   - **Log directory.** In `H/gwlog.yaml`, use `${PERF_RUNS}/_nginxlog:/var/log/nginx`.
   - Leave `H/instrument.yaml`, `H/pgsock.yaml`, `H/w10.yaml` and `H/httptools.yaml` as they
     are: they contain no host paths.
-- [ ] T004 [P] In `H/composite/composite.py`, replace the hard-coded `sys.path.insert(...)`
+- [X] T004 [P] In `H/composite/composite.py`, replace the hard-coded `sys.path.insert(...)`
   with `sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4] / "tests"))`,
   importing `pathlib`. `parents[4]` is `backend/`.
-- [ ] T005 [P] Archive the investigation records:
+- [X] T005 [P] Archive the investigation records:
   - Move `H/chain.sh`, `H/chain2.sh` and `H/chain3.sh` to `H/archive/`.
   - Add `H/archive/README.md`, one paragraph: "exact command chains used for the
     investigation runs; paths are that session's scratch paths and are kept only as a
     record; use `run_exp.sh`/`native_exp.sh` directly".
   - Also edit `H/layers_bench.py`'s docstring: its run command is `uv run python $H/layers_bench.py`.
-- [ ] T006 [P] Add `.perf-runs/` to `backend/.gitignore`, under a comment
+- [X] T006 [P] Add `.perf-runs/` to `backend/.gitignore`, under a comment
   `# spec 006 harness output (PERF_RUNS default)`.
-- [ ] T007 [P] In `scripts/run_load_tests.sh`, replace `OUT="$REPORTS/005-service-architecture"`
+- [X] T007 [P] In `scripts/run_load_tests.sh`, replace `OUT="$REPORTS/005-service-architecture"`
   with `OUT="$REPORTS/${REPORT_DIR:-005-service-architecture}"`. Add one usage line to the
   header comment: `REPORT_DIR=006-hot-path-latency ./scripts/run_load_tests.sh all`.
-- [ ] T008 Write `H/README.md` (≤ 40 lines), covering:
+- [X] T008 Write `H/README.md` (≤ 40 lines), covering:
   - what each script and overlay is
   - the env vars from T001–T002 (`BACK`, `LC`, `PERF_RUNS`, `APPDIR`, `APP`,
     `APPDIR_FLAG`, `STATIONS`, `DURATION`, `STOCK`, `CLIENT`, `EXTRA`, `GWLOG`)

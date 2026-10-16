@@ -6,6 +6,7 @@
 # Usage:
 #   ./scripts/run_load_tests.sh [default|stress|all]    (default: all; `normal` = default)
 #   STOCK_PER_ITEM=200000 ./scripts/run_load_tests.sh default   # no stock-outs (001 V7)
+#   REPORT_DIR=006-hot-path-latency ./scripts/run_load_tests.sh all   # reports subdirectory (default 005-service-architecture)
 #
 # Every run starts from `docker compose down -v`, so the database is seeded
 # fresh. The load client runs on the host with exactly the assignment's flags:
@@ -18,7 +19,7 @@ set -euo pipefail
 BACKEND="$(cd "$(dirname "$0")/.." && pwd)"
 CLIENT="$BACKEND/../load-client"
 REPORTS="$CLIENT/reports"
-OUT="$REPORTS/005-service-architecture"
+OUT="$REPORTS/${REPORT_DIR:-005-service-architecture}"
 MODE="${1:-all}"
 FAILED=0
 

@@ -1,7 +1,7 @@
 """Per-layer cost of one scan, single connection, native PG over the Unix socket.
 
-Run with the worktree venv:  DATABASE_URL=postgresql+asyncpg:///checkout_perf?host=/tmp \
-    .venv/bin/python layers_bench.py
+Run from backend/:  DATABASE_URL=postgresql+asyncpg:///checkout_perf?host=/tmp \
+    uv run python specs/006-service-perf-investigation/harness/layers_bench.py
 Needs a seeded checkout_perf DB (native_exp.sh leaves one behind).
 """
 import asyncio, os, statistics, time

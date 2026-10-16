@@ -6,6 +6,7 @@
 tests/
 specs/
 logs/
+.perf-runs/
 .specify/
 .claude/
 *.log

@@ -1,4 +1,5 @@
+# Investigation variant: descending stock-lock order. Relative to backend/.
 services:
   checkout:
     volumes:
-      - /Users/sbnaumann/.claude/jobs/fd6f61bd/tmp/harness/desc/checkout.py:/usr/local/lib/python3.11/site-packages/checkout_data/repos/checkout.py:ro
+      - ./specs/006-service-perf-investigation/harness/desc/checkout.py:/usr/local/lib/python3.11/site-packages/checkout_data/repos/checkout.py:ro

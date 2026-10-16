@@ -1,5 +1,7 @@
+# Investigation prototype: single-statement completion mounted over the installed modules.
+# Relative paths resolve against backend/ (the compose project directory).
 services:
   checkout:
     volumes:
-      - /Users/sbnaumann/.claude/jobs/fd6f61bd/tmp/harness/proto/service.py:/usr/local/lib/python3.11/site-packages/checkout_service/service.py:ro
-      - /Users/sbnaumann/.claude/jobs/fd6f61bd/tmp/harness/proto/checkout.py:/usr/local/lib/python3.11/site-packages/checkout_data/repos/checkout.py:ro
+      - ./specs/006-service-perf-investigation/harness/proto/service.py:/usr/local/lib/python3.11/site-packages/checkout_service/service.py:ro
+      - ./specs/006-service-perf-investigation/harness/proto/checkout.py:/usr/local/lib/python3.11/site-packages/checkout_data/repos/checkout.py:ro

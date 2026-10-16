@@ -12,3 +12,6 @@ build/
 
 # compose run logs (scripts/run_load_tests.sh)
 logs/
+
+# spec 006 harness output (PERF_RUNS default)
+.perf-runs/
