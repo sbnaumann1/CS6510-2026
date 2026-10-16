@@ -223,7 +223,7 @@ research R1).
 - [X] T017 [US1] Run `uv run pytest -q` (all green; T012's three tests pass) and
   `uv run python scripts/check_boundaries.py` (no violations). Fix code, never assertions,
   until both are clean.
-- [ ] T018 [US1] Load-validate US1 per the measurement rule:
+- [X] T018 [US1] Load-validate US1 per the measurement rule:
   - `docker compose build -q && caffeinate -i $H/run_exp.sh base100_us1`, and
     `APP=composite:app APPDIR_FLAG="--app-dir $PWD/$H/composite" caffeinate -i $H/native_exp.sh native100_us1`
   - **Pass** if:
@@ -248,7 +248,7 @@ research R1).
 
 ### Tests for User Story 2 ⚠️ (write first)
 
-- [ ] T019 [P] [US2] Create `tests/integration/test_autocommit_sessions.py`. Import
+- [X] T019 [P] [US2] Create `tests/integration/test_autocommit_sessions.py`. Import
   `engine, SessionLocal` and (new) `AutocommitSessionLocal` from `checkout_data`, and use
   `engine.connect()` as the observing peer connection. Two tests:
   1. **`test_autocommit_write_is_visible_before_commit`**
@@ -269,7 +269,7 @@ research R1).
 
 ### Implementation for User Story 2
 
-- [ ] T020 [US2] In `packages/checkout_data/src/checkout_data/__init__.py`, after `SessionLocal`:
+- [X] T020 [US2] In `packages/checkout_data/src/checkout_data/__init__.py`, after `SessionLocal`:
   - **Add:**
     - `autocommit_engine: AsyncEngine = engine.execution_options(isolation_level="AUTOCOMMIT")`
       (same pool)
@@ -277,12 +277,12 @@ research R1).
     - `async def get_autocommit_session()`, mirroring `get_session`
   - **Docstring.** Extend the module docstring with one sentence citing spec 006 research R2:
     "only for routes whose database work is one atomic statement".
-- [ ] T021 [US2] In `services/checkout/src/checkout_service/api.py`:
+- [X] T021 [US2] In `services/checkout/src/checkout_service/api.py`:
   - `start_transaction` and `scan_item` use `Depends(get_autocommit_session)`.
   - `complete_transaction` and `get_transaction` keep `Depends(get_session)`.
   - Update the import and the module docstring: one sentence on which routes are autocommit
     and why.
-- [ ] T022 [US2] In `services/checkout/src/checkout_service/service.py`, update the
+- [X] T022 [US2] In `services/checkout/src/checkout_service/service.py`, update the
   `start_transaction` and `scan_item` docstrings/comments. They run on autocommit sessions,
   so `session.commit()` is a harmless no-op kept for symmetry. On scan's not-open path,
   `rollback()` is a no-op too, and correct because the CTE's `WHERE status = 'OPEN'`

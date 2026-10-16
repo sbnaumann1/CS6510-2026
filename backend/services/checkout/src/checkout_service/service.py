@@ -43,6 +43,8 @@ def public_id(tx_id: int) -> str:
 
 
 async def start_transaction(session: AsyncSession, station_id: str) -> dict[str, Any]:
+    """Runs on an autocommit session (spec 006 R2): the INSERT commits on its own and
+    the commit() below is a no-op, kept so the function is correct on either kind."""
     row = await repo.insert_transaction(session, station_id)
     await session.commit()
     return {
@@ -62,6 +64,10 @@ async def scan_item(
 
     The scan sequence (transaction_item.id) is no longer returned: Analytics
     tails it from the shared database instead of being triggered here.
+
+    Runs on an autocommit session (spec 006 R2): the scan CTE is one atomic
+    statement, so rollback()/commit() below are no-ops there. On the not-open path
+    nothing needs undoing: the CTE's `WHERE status = 'OPEN'` matched no row.
     """
     # Resolved from memory before any DB work, so SKU_NOT_FOUND precedes
     # TRANSACTION_NOT_OPEN (error-catalog.md precedence).
