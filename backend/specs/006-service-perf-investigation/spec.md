@@ -1,6 +1,6 @@
 # Feature Specification: Hot-Path Latency Reduction for the Service Architecture
 
-**Feature Branch**: `006-service-perf-investigation`
+**Feature Branch**: `006-hot-path-latency`
 
 **Created**: 2026-10-16
 
