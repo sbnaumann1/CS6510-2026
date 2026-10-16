@@ -242,6 +242,8 @@ Both are visible in the numbers, and the README will name them rather than hide 
 
 **Rationale**: Gateway traffic no longer carries `Upgrade: h2c` (R4). But services are also reachable directly on `127.0.0.1:8081–8084` for the US3 bypass test. h11 keeps them correct for any client, Java included. Switching to `httptools` is a measured tuning option, not a default.
 
+> **Superseded by spec 006 research R3**: the services now default to `httptools` (`UVICORN_HTTP`), measured at +15 % throughput behind the gateway, and the gateway clears `Upgrade`/`HTTP2-Settings` explicitly.
+
 ## R11. Test strategy
 
 **Decision**: There are two modes for the existing suite, plus new tests.

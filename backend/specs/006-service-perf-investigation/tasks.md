@@ -287,10 +287,18 @@ research R1).
   so `session.commit()` is a harmless no-op kept for symmetry. On scan's not-open path,
   `rollback()` is a no-op too, and correct because the CTE's `WHERE status = 'OPEN'`
   modified nothing. **No logic change.**
-- [ ] T023 [US2] Run `uv run pytest -q` (all green, including T019 and the unchanged scan/start
+- [X] T023 [US2] Run `uv run pytest -q` (all green, including T019 and the unchanged scan/start
   contract tests for 404/409 precedence). Then `docker compose build -q && caffeinate -i $H/run_exp.sh base100_us2`.
   **Pass**: SC-004 per the Independent Test above; tx/s and `COMPLETE` p95 no worse than
   `base100_us1` beyond noise (±5 %); invariant PASS.
+  - **Result (`base100_us2`)**:
+    - **Met:** SC-004 (`BEGIN`/complete 12.6 → 1.04); tx/s unchanged (560.7 vs 559.8).
+    - **Missed:** `COMPLETE` p95 rose 146 → 224 ms, outside this task's ±5 % criterion and
+      above SC-001's 200 ms.
+    - **Cause** (`harness/cycle.py`): closed-loop redistribution, not lost capacity. The
+      per-transaction cycle is unchanged (178.2 vs 177.9 ms); ~20 ms moved out of
+      start + scans and into the lock queue. Postgres CPU fell 25 %.
+    - **Resolution**: deferred to T036.
 
 **Checkpoint**: US1 and US2 both work. Requests with one statement make one round trip.
 
@@ -307,7 +315,7 @@ configuration that `Upgrade: h2c` never reaches them
 
 ### Tests for User Story 3 ⚠️ (write first)
 
-- [ ] T024 [P] [US3] Add `test_gateway_clears_hop_by_hop_upgrade_headers` to
+- [X] T024 [P] [US3] Add `test_gateway_clears_hop_by_hop_upgrade_headers` to
   `tests/unit/test_gateway_routes.py`:
   - Read `gateway/nginx.conf`, the same way the file's existing tests locate it.
   - Assert it contains each of these exactly once, in the `http` block (whitespace-normalized):
@@ -319,13 +327,13 @@ configuration that `Upgrade: h2c` never reaches them
 
 ### Implementation for User Story 3
 
-- [ ] T025 [US3] In `gateway/nginx.conf`:
+- [X] T025 [US3] In `gateway/nginx.conf`:
   - Add `proxy_set_header Upgrade "";` and `proxy_set_header HTTP2-Settings "";` right after
     `proxy_set_header Connection "";`.
   - Reword the comment above them: the client's Upgrade/HTTP2-Settings headers are cleared
     explicitly so services can run httptools (spec 006 research R3; 001 R14).
   - The route table is unchanged, so `test_nginx_and_dispatcher_route_tables_match` must still pass.
-- [ ] T026 [P] [US3] Make the same edit in all four service images:
+- [X] T026 [P] [US3] Make the same edit in all four service images:
   - **Files:** `services/catalog/Dockerfile`, `services/checkout/Dockerfile`,
     `services/inventory/Dockerfile`, `services/analytics/Dockerfile`.
   - **`ENV`.** Add `UVICORN_HTTP=httptools` to the existing `ENV` line.
@@ -333,7 +341,7 @@ configuration that `Upgrade: h2c` never reaches them
     expands variables.
   - **Comment.** Replace `--http h11: research R10.` with
     `--http ${UVICORN_HTTP} (default httptools): spec 006 research R3; set UVICORN_HTTP=h11 if a client that sends Upgrade: h2c can reach this port directly.`
-- [ ] T027 [US3] Add a superseded note to `specs/005-service-architecture/contracts/gateway-routes.md`,
+- [X] T027 [US3] Add a superseded note to `specs/005-service-architecture/contracts/gateway-routes.md`,
   under the line about `Upgrade`/`HTTP2-Settings`: `> Spec 006: these headers are now cleared explicitly (proxy_set_header … ""), and services run httptools — see ../../006-service-perf-investigation/contracts/service-runtime.md.`
   Add a matching one-line note at the end of 005 `research.md` R10.
 - [ ] T028 [US3] Validate (quickstart V2):

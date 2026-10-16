@@ -50,3 +50,20 @@ def test_every_contract_path_routes_to_its_owner():
 def test_unknown_paths_go_to_checkout():
     assert route("/nope") == "checkout"
     assert route("/") == "checkout"
+
+
+def test_gateway_clears_hop_by_hop_upgrade_headers():
+    """Services run httptools, which mishandles the Java client's `Upgrade: h2c`
+    (001 research R14), so the gateway must never forward it (spec 006
+    contracts/service-runtime.md). Declared once at http level; a location that set
+    its own proxy_set_header would stop inheriting these, so none may."""
+    conf = NGINX_CONF.read_text()
+    http_level = " ".join(conf[conf.index("http {") : conf.index("server {")].split())
+    for directive in (
+        'proxy_set_header Connection "";',
+        'proxy_set_header Upgrade "";',
+        'proxy_set_header HTTP2-Settings "";',
+    ):
+        assert http_level.count(directive) == 1, directive
+    for _, path, body in _LOCATION.findall(conf):
+        assert "proxy_set_header" not in body, f"location {path} overrides proxy_set_header"
