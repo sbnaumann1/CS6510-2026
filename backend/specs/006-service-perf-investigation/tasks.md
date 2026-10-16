@@ -108,14 +108,14 @@ the investigation's.
 
 **⚠️ CRITICAL**: Don't start US1 code until T009–T011 are recorded.
 
-- [ ] T009 Calibration, compose: `docker compose build -q && caffeinate -i $H/run_exp.sh base100_pre`
+- [X] T009 Calibration, compose: `docker compose build -q && caffeinate -i $H/run_exp.sh base100_pre`
   (100 stations / 30 s / stock 2 000 000).
   - **Expect** 409 tx/s ± ~5 % and `COMPLETE` p95 ≈ 430 ms (investigation `base100`).
   - **If it is outside ±10 %,** stop and re-check the power state and host load before going on.
-- [ ] T010 Calibration, native, 005 code in one process:
+- [X] T010 Calibration, native, 005 code in one process:
   `APP=composite:app APPDIR_FLAG="--app-dir $PWD/$H/composite" caffeinate -i $H/native_exp.sh native100_pre`.
   Expect ≈ 810–830 tx/s and `COMPLETE` p95 ≈ 125–145 ms.
-- [ ] T011 Calibration, graded stress config:
+- [X] T011 Calibration, graded stress config:
   `STATIONS=100 DURATION=120 STOCK=10000 caffeinate -i $H/run_exp.sh g_stress_pre`.
   - **Expect** ≈ 186 tx/s, ≈ 5 060 items/s, `COMPLETE` p95 ≈ 249 ms, invariant PASS.
   - **Record** T009–T011's summary lines in a scratch note; T037 will copy them into
@@ -138,7 +138,7 @@ research R1).
 
 ### Tests for User Story 1 ⚠️ (write first)
 
-- [ ] T012 [P] [US1] Create `tests/integration/test_completion_atomic.py`, using the `client`
+- [X] T012 [P] [US1] Create `tests/integration/test_completion_atomic.py`, using the `client`
   and `session` fixtures. Follow `tests/integration/test_low_stock.py`'s style
   (`sqlalchemy.text`, `await session.commit()` after setup writes). Three tests:
   1. **`test_short_basket_modifies_nothing_and_lists_every_short_sku`**
@@ -174,7 +174,7 @@ research R1).
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Add `complete_basket` to `packages/checkout_data/src/checkout_data/repos/checkout.py`,
+- [X] T013 [US1] Add `complete_basket` to `packages/checkout_data/src/checkout_data/repos/checkout.py`,
   exactly as specified in `contracts/completion-statement.md`:
   - **Statement constant.** A module-level `_COMPLETE_BASKET = text(...)` holding the CTE
     from research R1:
@@ -196,7 +196,7 @@ research R1).
     - why it is one statement (hold time = round trips; investigation F1)
     - how lock order is guaranteed (the One-Time Filter on `ok` makes `locked` run before any
       write; research R1)
-- [ ] T014 [US1] In `services/checkout/src/checkout_service/service.py`, change
+- [X] T014 [US1] In `services/checkout/src/checkout_service/service.py`, change
   `complete_transaction`:
   - **Replace steps 3–6** with:
     - `skus = [b.sku for b in basket]`, `qtys = [b.qty for b in basket]`
@@ -209,7 +209,7 @@ research R1).
     `async with session.begin():`.
   - **Cleanup.** Remove the `emit_crossings` import, and update the module docstring and
     step comments to cite spec 006 research R1 instead of 005 "research R10".
-- [ ] T015 [US1] Delete the superseded code, then confirm
+- [X] T015 [US1] Delete the superseded code, then confirm
   `grep -rn -E "lock_stock|decrement_stock|insert_alerts|emit_crossings|repo.complete_transaction" packages services tests`
   returns nothing:
   - **In `packages/checkout_data/src/checkout_data/repos/checkout.py`:**
@@ -217,10 +217,10 @@ research R1).
     - the constants `_LOCK_STOCK`, `_COMPLETE_TX` and `_INSERT_ALERT`
     - the now-unused imports (`ARRAY`, `Text`, `bindparam` are needed only if T013 uses them)
   - **The file** `services/checkout/src/checkout_service/alerts.py`.
-- [ ] T016 [US1] Bump `packages/checkout_data/pyproject.toml` `version` from `"0.5.0"` to `"0.6.0"`
+- [X] T016 [US1] Bump `packages/checkout_data/pyproject.toml` `version` from `"0.5.0"` to `"0.6.0"`
   (research R5) and run `uv lock`. Then `uv run pytest -q tests/unit/test_service_locks.py`
   must pass, with the per-image `requirements.lock` files unchanged.
-- [ ] T017 [US1] Run `uv run pytest -q` (all green; T012's three tests pass) and
+- [X] T017 [US1] Run `uv run pytest -q` (all green; T012's three tests pass) and
   `uv run python scripts/check_boundaries.py` (no violations). Fix code, never assertions,
   until both are clean.
 - [ ] T018 [US1] Load-validate US1 per the measurement rule:

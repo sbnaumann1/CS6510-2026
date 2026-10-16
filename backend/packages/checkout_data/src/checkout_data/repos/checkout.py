@@ -7,10 +7,9 @@ owns the transaction boundary (research R4).
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Sequence
 
-from sqlalchemy import ARRAY, Row, Text, bindparam, text
+from sqlalchemy import ARRAY, Integer, Row, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # The consuming service; the boundary check (scripts/check_boundaries.py)
@@ -55,26 +54,63 @@ _BASKET = text(
     " WHERE transaction_id = :tx_id GROUP BY sku ORDER BY sku"
 )
 
-# One deterministic lock order for every concurrent completion, which is what
-# makes deadlock structurally impossible (001 research R10).
-_LOCK_STOCK = text(
-    "SELECT sku FROM inventory_stock WHERE sku = ANY(:skus) ORDER BY sku FOR UPDATE"
-).bindparams(bindparam("skus", type_=ARRAY(Text)))
-
-_COMPLETE_TX = text(
-    "UPDATE transaction"
-    "   SET status = 'COMPLETED', completed_at = now(), total_amount_cents = :total"
-    " WHERE id = :tx_id RETURNING completed_at"
+# The completion's whole critical section in one statement (spec 006 research R1,
+# contracts/completion-statement.md). The hot-SKU stock locks are held until COMMIT,
+# and every client round trip made while holding them lengthens the hold that all
+# other completions queue behind (006 investigation F1); here COMMIT is the only one.
+#
+# Lock order: `locked` takes every basket row FOR UPDATE in SKU order, which is what
+# makes deadlock structurally impossible (001 research R10). It is MATERIALIZED and
+# read by `ok`, and `dec`/`fin` run under a one-time filter on `ok`, so all locks are
+# granted before any row is modified. Under READ COMMITTED, FOR UPDATE and the UPDATE
+# both see the latest committed stock, so `ok` and the decrement agree and stock never
+# goes negative. When `ok` is false nothing is modified and `short` lists the SKUs
+# that are missing or short. The alert rule fires once per descent (001 FR-006).
+# Arrays rather than a VALUES list keep one statement text for every basket size.
+_COMPLETE_BASKET = text(
+    """
+WITH v AS (
+  SELECT * FROM unnest(CAST(:skus AS text[]), CAST(:qtys AS int[])) AS v(sku, qty)
+),
+locked AS MATERIALIZED (
+  SELECT s.sku, s.current_stock FROM inventory_stock s
+   WHERE s.sku = ANY(CAST(:skus AS text[])) ORDER BY s.sku FOR UPDATE
+),
+ok AS (
+  SELECT count(*) = cardinality(CAST(:skus AS text[]))
+         AND coalesce(bool_and(l.current_stock >= v.qty), false) AS ok
+    FROM v JOIN locked l USING (sku)
+),
+dec AS (
+  UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty
+    FROM v WHERE s.sku = v.sku AND (SELECT ok FROM ok)
+  RETURNING s.sku, s.current_stock, v.qty
+),
+alerts AS (
+  INSERT INTO low_stock_alert (sku, current_stock, threshold)
+  SELECT sku, current_stock, :thr FROM dec
+   WHERE current_stock < :thr AND :thr <= current_stock + qty
+  RETURNING 1
+),
+fin AS (
+  UPDATE transaction
+     SET status = 'COMPLETED', completed_at = now(), total_amount_cents = :total
+   WHERE id = :tx_id AND (SELECT ok FROM ok)
+  RETURNING completed_at
+)
+SELECT (SELECT ok FROM ok) AS ok,
+       (SELECT completed_at FROM fin) AS completed_at,
+       (SELECT array_agg(v.sku ORDER BY v.sku) FROM v LEFT JOIN locked l USING (sku)
+         WHERE l.sku IS NULL OR l.current_stock < v.qty) AS short
+"""
+).bindparams(
+    bindparam("skus", type_=ARRAY(Text)),
+    bindparam("qtys", type_=ARRAY(Integer)),
 )
 
 _GET_TX = text(
     "SELECT id, station_id, status, item_count, running_total_cents, started_at"
     "  FROM transaction WHERE id = :tx_id"
-)
-
-_INSERT_ALERT = text(
-    "INSERT INTO low_stock_alert (sku, current_stock, threshold)"
-    " VALUES (:sku, :current_stock, :threshold)"
 )
 
 # Uses the transaction_open_started_idx partial index.
@@ -113,49 +149,36 @@ async def get_basket(session: AsyncSession, tx_id: int) -> Sequence[Row]:
     return (await session.execute(_BASKET, {"tx_id": tx_id})).all()
 
 
-async def lock_stock(session: AsyncSession, skus: list[str]) -> None:
-    await session.execute(_LOCK_STOCK, {"skus": skus})
+async def complete_basket(
+    session: AsyncSession,
+    tx_id: int,
+    skus: list[str],
+    qtys: list[int],
+    total_cents: int,
+    threshold: int,
+) -> Row:
+    """Lock, check, decrement, alert and finalize in one statement.
 
-
-async def decrement_stock(
-    session: AsyncSession, basket: Sequence[tuple[str, int]]
-) -> Sequence[Row]:
-    """One conditional batched decrement; returns (sku, current_stock) for each
-    SKU that had enough stock. A short result means at least one did not."""
-    values = ", ".join(
-        f"(CAST(:sku{i} AS text), CAST(:qty{i} AS integer))" for i in range(len(basket))
-    )
-    params: dict[str, Any] = {}
-    for i, (sku, qty) in enumerate(basket):
-        params[f"sku{i}"] = sku
-        params[f"qty{i}"] = qty
+    `skus` ascending and unique, `qtys[i]` the quantity of `skus[i]`; call inside the
+    caller's transaction after `lock_transaction`. Returns (ok, completed_at, short):
+    when `ok` is false nothing was modified and `short` lists the short SKUs, sorted.
+    """
     return (
         await session.execute(
-            text(
-                "UPDATE inventory_stock s"
-                "   SET current_stock = s.current_stock - v.qty"
-                f"  FROM (VALUES {values}) AS v(sku, qty)"
-                "  WHERE s.sku = v.sku AND s.current_stock >= v.qty"
-                " RETURNING s.sku, s.current_stock"
-            ),
-            params,
+            _COMPLETE_BASKET,
+            {
+                "tx_id": tx_id,
+                "skus": skus,
+                "qtys": qtys,
+                "total": total_cents,
+                "thr": threshold,
+            },
         )
-    ).all()
-
-
-async def complete_transaction(
-    session: AsyncSession, tx_id: int, total_cents: int
-) -> datetime:
-    return await session.scalar(_COMPLETE_TX, {"tx_id": tx_id, "total": total_cents})
+    ).one()
 
 
 async def get_transaction(session: AsyncSession, tx_id: int) -> Row | None:
     return (await session.execute(_GET_TX, {"tx_id": tx_id})).first()
-
-
-async def insert_alerts(session: AsyncSession, crossings: list[dict[str, Any]]) -> None:
-    """crossings: [{"sku", "current_stock", "threshold"}, ...], non-empty."""
-    await session.execute(_INSERT_ALERT, crossings)
 
 
 async def sweep_abandoned(session: AsyncSession, minutes: int) -> int:

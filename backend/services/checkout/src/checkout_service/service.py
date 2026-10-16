@@ -1,9 +1,10 @@
 """Checkout Service business logic: start, scan, complete, read.
 
 The scan path is one CTE round trip (research R9). The completion path is one
-explicit DB transaction that takes stock locks in SKU order and applies a single
-conditional batched decrement (research R10) — that is what makes the graded
-invariant hold under concurrency.
+explicit DB transaction: lock the transaction row, read the basket, then lock the
+stock rows in SKU order, check, decrement, alert and finalize in a single statement
+(spec 006 research R1). That keeps the graded invariant under concurrency, and holds
+the hot-SKU locks for one client round trip (COMMIT) instead of four or five.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from checkout_web.errors import (
     ApiError,
 )
 from checkout_data.money import cents_to_amount
-from checkout_service.alerts import emit_crossings
 
 _TX_ID = re.compile(r"^tx-(\d+)$")
 
@@ -123,37 +123,27 @@ async def complete_transaction(session: AsyncSession, tx_id: int) -> dict[str, A
                 EMPTY_BASKET, f"Transaction {public_id(tx_id)} has no scanned items."
             )
 
-        skus = [b.sku for b in basket]
-
-        # 3. Acquire every stock lock in one deterministic order.
-        await repo.lock_stock(session, skus)
-
-        # 4. One conditional batched decrement. Its WHERE clause is what
-        #    guarantees stock never goes negative; a short count means at least
-        #    one SKU could not satisfy its quantity, so the whole thing rolls back.
-        decremented = await repo.decrement_stock(session, basket)
-
-        if len(decremented) < len(basket):
-            short = sorted(set(skus) - {d.sku for d in decremented})
-            raise ApiError(
-                INSUFFICIENT_STOCK,
-                "Insufficient stock for " + ", ".join(short) + ".",
-            )
-
-        # 5. Alert rows for any SKU that crossed the threshold on this
-        #    completion, inside the same transaction as the decrement (SC-005).
-        await emit_crossings(
-            session,
-            decremented,
-            {b.sku: b.qty for b in basket},
-            settings.low_stock_threshold,
-        )
-
-        # 6. Finalize.
+        # 3-6. One statement: lock every stock row in SKU order, check that each
+        #      can cover its quantity, decrement, insert alert rows for threshold
+        #      crossings (SC-005) and finalize — or modify nothing (spec 006 R1).
+        #      After the locks are granted, only COMMIT waits on a round trip.
         total_cents = sum(
             catalog_cache.get(b.sku)[1] * b.qty for b in basket  # type: ignore[index]
         )
-        completed_at = await repo.complete_transaction(session, tx_id, total_cents)
+        res = await repo.complete_basket(
+            session,
+            tx_id,
+            [b.sku for b in basket],
+            [b.qty for b in basket],
+            total_cents,
+            settings.low_stock_threshold,
+        )
+        if not res.ok:
+            raise ApiError(
+                INSUFFICIENT_STOCK,
+                "Insufficient stock for " + ", ".join(res.short) + ".",
+            )
+        completed_at = res.completed_at
 
         # 7. Build the receipt from the basket plus the in-memory catalog.
         lines = []
