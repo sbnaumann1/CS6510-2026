@@ -1,0 +1,5 @@
+asyncpg SELECT 1 (bare round trip)         mean=0.033 ms  p50=0.029  p95=0.055
+asyncpg scan CTE, autocommit (1 RT)        mean=0.053 ms  p50=0.052  p95=0.059
+asyncpg BEGIN + scan + COMMIT (3 RT)       mean=0.109 ms  p50=0.108  p95=0.116
+SQLAlchemy session: repo.scan_item+commit  mean=0.252 ms  p50=0.248  p95=0.263
+service layer: svc.scan_item               mean=0.250 ms  p50=0.249  p95=0.260

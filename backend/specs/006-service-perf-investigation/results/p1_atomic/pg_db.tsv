@@ -1,0 +1,3 @@
+xact_commit	xact_rollback	deadlocks	blks_hit	blks_read	tup_updated	tup_inserted
+198518	344	0	7703987	58	329901	182167
+(1 row)

@@ -1,0 +1,32 @@
+calls	total_ms	mean_ms	sd_ms	rows	shared_blks_hit	shared_blks_read	q
+12341	1244638.0	100.854	152.423	115530	1579248	0	SELECT sku FROM inventory_stock WHERE sku = ANY($1::TEXT[]) ORDER BY sku FOR UPDATE
+70021	7528.1	0.108	0.174	70021	1722199	0	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status = $5 RETURNING id, ite
+59842	6544.3	0.109	0.177	59842	1474247	0	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status = $5 RETURNING id, ite
+129863	1306.1	0.010	0.056	129863	519452	0	SELECT $2 FROM ONLY "public"."catalog_item" x WHERE "sku" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+129863	853.1	0.007	0.025	129863	538202	0	SELECT $2 FROM ONLY "public"."transaction" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+12341	620.0	0.050	0.109	115530	119408	0	SELECT sku, count(*) AS qty FROM transaction_item WHERE transaction_id = $1 GROUP BY sku ORDER BY sku
+12341	499.4	0.040	0.077	12341	78492	2	INSERT INTO transaction (station_id) VALUES ($1) RETURNING id, status, item_count, running_total_cents, started_at
+155159	472.7	0.003	0.010	0	0	0	BEGIN ISOLATION LEVEL READ COMMITTED
+12341	450.5	0.037	0.068	12341	121882	0	UPDATE transaction SET status = $3, completed_at = now(), total_amount_cents = $1 WHERE id = $2 RETURNING completed_at
+12341	321.4	0.026	0.061	12341	53161	0	SELECT status, station_id, started_at FROM transaction WHERE id = $1 FOR UPDATE
+780	140.2	0.180	0.142	10920	77925	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+716	136.7	0.191	0.171	10740	76872	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+746	133.0	0.178	0.256	9698	69224	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+789	126.9	0.161	0.143	9468	68373	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+809	122.0	0.151	0.121	8899	63471	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+632	119.0	0.188	0.154	10112	71739	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+776	112.6	0.145	0.134	7760	56198	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+747	101.2	0.135	0.155	6723	49121	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+472	95.8	0.203	0.170	8024	57274	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+703	90.2	0.128	0.145	5624	41584	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+300	90.2	0.301	0.320	130604	130948	0	SELECT id, sku FROM transaction_item WHERE id > $1 ORDER BY id LIMIT $2
+715	90.0	0.126	0.702	3575	26527	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+695	75.3	0.108	0.091	4865	35985	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+686	66.5	0.097	0.098	4116	30408	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+293	62.4	0.213	0.146	5274	37189	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+154801	59.6	0.000	0.003	0	0	0	COMMIT
+661	50.4	0.076	0.086	2644	19872	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+647	44.5	0.069	0.106	1941	14567	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+673	39.7	0.059	0.093	1346	10192	0	UPDATE inventory_stock s SET current_stock = s.current_stock - v.qty FROM (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer
+256	31.0	0.121	0.107	256	1782	0	INSERT INTO popular_window_snapshot (id, window_size, slide_interval, window_start, window_end, computed_at, ranking) VALUES ($7, $1, $2, $3, $4, $5, CAST($6 AS
+(30 rows)

@@ -1,0 +1,5 @@
+services:
+  gateway:
+    volumes:
+      - /Users/sbnaumann/.claude/jobs/fd6f61bd/tmp/harness/nginx-timing.conf:/etc/nginx/nginx.conf:ro
+      - /Users/sbnaumann/.claude/jobs/fd6f61bd/tmp/runs/_nginxlog:/var/log/nginx

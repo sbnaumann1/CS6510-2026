@@ -1,0 +1,5 @@
+services:
+  checkout:
+    environment:
+      WORKERS: "10"
+      DB_POOL_SIZE: "6"

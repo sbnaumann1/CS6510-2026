@@ -1,0 +1,14 @@
+p2_desc: tx/s=404.1 items/s=4251 scan mean/p50/p95/p99=11.16/8.96/25.13/40.40 complete mean/p50/p95/p99=117.06/69.90/378.3/627.6 cerr=0.0% | PASS — initial_stock - current_stock == completed line items, per SKU invariant exit=0
+  pg backends (avg per sample): active/Lock/transactionid=31.9, idle/Client/ClientRead=15.4, active/Lock/tuple=8.3, idle in transaction/Client/ClientRead=7.6, active/Client/ClientRead=0.5, active/-/-=0.5, idle in transaction/-/-=0.5, idle/-/-=0.1
+  docker cpu% (median): analytics-1=13, catalog-1=3, checkout-1=464, gateway-1=47, inventory-1=10, postgres-1=157
+  host cpu% (median): vm=820, java=75
+calls	total_ms	mean_ms	sd_ms	rows	q
+12181	1241119.5	101.890	128.736	113940	SELECT sku FROM inventory_stock WHERE sku = ANY($1::TEXT[]) ORDER BY sku DESC FOR UPDATE
+66537	7221.6	0.109	0.319	66537	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status =
+61583	6077.9	0.099	0.105	61583	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status =
+128120	1192.4	0.009	0.027	128120	SELECT $2 FROM ONLY "public"."catalog_item" x WHERE "sku" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+128120	798.6	0.006	0.025	128120	SELECT $2 FROM ONLY "public"."transaction" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+12181	584.2	0.048	0.056	113940	SELECT sku, count(*) AS qty FROM transaction_item WHERE transaction_id = $1 GROUP BY sku ORDER BY sku
+12181	581.0	0.048	0.400	12181	INSERT INTO transaction (station_id) VALUES ($1) RETURNING id, status, item_count, running_total_cents, started_at
+153092	469.2	0.003	0.012	0	BEGIN ISOLATION LEVEL READ COMMITTED
+149989	353	0	5631889	57	249260	137547

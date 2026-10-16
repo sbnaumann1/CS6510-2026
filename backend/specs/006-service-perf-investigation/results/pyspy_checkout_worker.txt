@@ -1,0 +1,39 @@
+samples=3563
+inclusive by library:
+  asyncio             57.1%
+  uvicorn             53.2%
+  sqlalchemy          27.7%
+  h11                 25.9%
+  fastapi             21.2%
+  starlette           20.3%
+  asyncpg              9.1%
+  checkout_service     9.0%
+  checkout_data        7.5%
+  checkout_web         0.5%
+  pydantic             0.3%
+top self (leaf) frames:
+   28.1%  run (asyncio/runners.py)
+    6.3%  
+    1.9%  handle_events (uvicorn/protocols/http/h11_impl.py)
+    1.9%  greenlet_spawn (sqlalchemy/util/_concurrency_py3k.py)
+    1.8%  execute (asyncpg/connection.py)
+    1.6%  __do_execute (asyncpg/prepared_stmt.py)
+    1.6%  solve_dependencies (fastapi/dependencies/utils.py)
+    1.5%  send (uvicorn/protocols/http/h11_impl.py)
+    1.4%  validate (h11/_util.py)
+    1.3%  _prepare_and_execute (sqlalchemy/dialects/postgresql/asyncpg.py)
+    1.3%  wait_for (asyncio/tasks.py)
+    1.2%  await_only (sqlalchemy/util/_concurrency_py3k.py)
+    1.2%  _go (sqlalchemy/orm/state_changes.py)
+    1.1%  _process_event (h11/_connection.py)
+    1.0%  __aexit__ (contextlib.py)
+    0.9%  normalize_and_validate (h11/_headers.py)
+    0.8%  _exec_single_context (sqlalchemy/engine/base.py)
+    0.8%  matches (starlette/routing.py)
+    0.8%  maybe_extract_lines (h11/_receivebuffer.py)
+    0.7%  maybe_read_from_IDLE_client (h11/_readers.py)
+    0.7%  construct_params (sqlalchemy/sql/compiler.py)
+    0.6%  __init__ (h11/_events.py)
+    0.6%  _init_compiled (sqlalchemy/engine/default.py)
+    0.6%  create_task (asyncio/tasks.py)
+    0.6%  _ensure_future (asyncio/tasks.py)

@@ -1,0 +1,18 @@
+base100: tx/s=409.0 items/s=4324 scan mean/p50/p95/p99=10.87/9.24/23.62/37.89 complete mean/p50/p95/p99=116.72/47.36/432.0/699.1 cerr=0.0% | PASS — initial_stock - current_stock == completed line items, per SKU invariant exit=0
+  pg backends (avg per sample): active/Lock/tuple=30.4, idle/Client/ClientRead=21.6, idle in transaction/Client/ClientRead=6.3, active/Lock/transactionid=4.3, active/LWLock/LockManager=0.7, active/-/-=0.7, idle in transaction/-/-=0.4, active/Client/ClientRead=0.3
+  docker cpu% (median): analytics-1=18, catalog-1=13, checkout-1=478, gateway-1=53, inventory-1=15, postgres-1=185
+  host cpu% (median): vm=842, java=72
+route             n   req_ms upstr_ms   gw_ms conn_ms  up p50  up p95  up p99
+start         12334   11.574   11.566   0.008   0.001     9.0    24.0    63.0
+scan         130409   10.186   10.179   0.007   0.000     9.0    23.0    37.0
+complete      12334  116.042  116.034   0.009   0.000    47.0   431.0   699.0
+calls	total_ms	mean_ms	sd_ms	rows	q
+12334	1259078.5	102.082	154.465	115878	SELECT sku FROM inventory_stock WHERE sku = ANY($1::TEXT[]) ORDER BY sku FOR UPDATE
+70693	8503.9	0.120	0.597	70693	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status =
+59716	6505.4	0.109	0.151	59716	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status =
+130409	1328.2	0.010	0.043	130409	SELECT $2 FROM ONLY "public"."catalog_item" x WHERE "sku" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+130409	864.5	0.007	0.030	130409	SELECT $2 FROM ONLY "public"."transaction" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+12334	661.0	0.054	0.170	115878	SELECT sku, count(*) AS qty FROM transaction_item WHERE transaction_id = $1 GROUP BY sku ORDER BY sku
+12334	568.6	0.046	0.202	12334	INSERT INTO transaction (station_id) VALUES ($1) RETURNING id, status, item_count, running_total_cents, started_at
+155694	487.3	0.003	0.014	0	BEGIN ISOLATION LEVEL READ COMMITTED
+153093	356	0	6188000	61	254160	140473

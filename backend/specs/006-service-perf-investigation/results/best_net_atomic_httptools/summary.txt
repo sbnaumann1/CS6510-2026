@@ -1,0 +1,14 @@
+best_net_atomic_httptools: tx/s=735.2 items/s=7672 scan mean/p50/p95/p99=8.19/6.80/19.16/28.44 complete mean/p50/p95/p99=41.57/23.61/136.5/220.3 cerr=0.0% | PASS — initial_stock - current_stock == completed line items, per SKU invariant exit=0
+  pg backends (avg per sample): idle/Client/ClientRead=25.4, idle in transaction/Client/ClientRead=12.1, active/Lock/tuple=11.7, active/Lock/transactionid=7.5, active/-/-=1.6, active/LWLock/LockManager=1.5, idle in transaction/-/-=1.5, active/Client/ClientRead=0.9
+  docker cpu% (median): dazzling_mirzakhani=130, analytics-1=15, catalog-1=14, checkout-1=486, gateway-1=64, inventory-1=12, postgres-1=250
+  host cpu% (median): vm=974
+calls	total_ms	mean_ms	sd_ms	rows	q
+739	30928.5	41.852	53.385	739	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+751	30284.6	40.326	48.897	751	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+731	29664.6	40.581	55.204	731	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+656	29054.8	44.291	54.290	656	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+714	29045.4	40.680	49.138	714	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+720	27323.3	37.949	52.137	720	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+618	27159.7	43.948	53.371	618	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+713	25283.8	35.461	46.204	713	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS 
+271245	353	0	10568641	56	451126	248956

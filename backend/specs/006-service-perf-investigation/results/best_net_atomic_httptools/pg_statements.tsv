@@ -1,0 +1,32 @@
+calls	total_ms	mean_ms	sd_ms	rows	shared_blks_hit	shared_blks_read	q
+739	30928.5	41.852	53.385	739	191302	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+751	30284.6	40.326	48.897	751	201130	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+731	29664.6	40.581	55.204	731	175680	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+656	29054.8	44.291	54.290	656	205051	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+714	29045.4	40.680	49.138	714	206014	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+720	27323.3	37.949	52.137	720	148203	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+618	27159.7	43.948	53.371	618	195960	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+713	25283.8	35.461	46.204	713	152796	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+693	24357.6	35.148	41.135	693	180849	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+748	22985.4	30.729	43.153	748	117609	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+643	22848.7	35.535	47.439	643	139095	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+565	22627.3	40.048	48.137	565	172021	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+123725	22617.4	0.183	0.362	123725	3013815	0	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status = $5 RETURNING id, ite
+634	22018.4	34.729	40.117	634	171898	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+728	22005.9	30.228	46.815	728	122325	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+639	20543.5	32.149	41.408	639	142205	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+636	20460.4	32.170	40.726	636	150097	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+597	19674.0	32.955	51.320	597	106907	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+513	19575.1	38.158	47.406	513	156824	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+107197	18973.7	0.177	0.390	107197	2605092	0	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status = $5 RETURNING id, ite
+603	18750.7	31.096	43.795	603	114079	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+436	18295.1	41.961	48.426	436	144949	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+672	17139.2	25.505	40.487	672	78309	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+667	16458.3	24.675	37.199	667	85757	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+556	15896.7	28.591	45.708	556	84034	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+390	15594.8	39.987	49.271	390	126692	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+706	15485.7	21.934	41.275	706	66901	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+576	14160.9	24.585	41.612	576	76731	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+672	12910.6	19.212	42.821	672	51557	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer))), locked A
+285	11539.3	40.489	52.728	285	96062	0	WITH v(sku, qty) AS (VALUES (CAST($1 AS text), CAST($2 AS integer)), (CAST($3 AS text), CAST($4 AS integer)), (CAST($5 AS text), CAST($6 AS integer)), (CAST($7 
+(30 rows)
