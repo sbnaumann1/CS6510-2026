@@ -344,7 +344,7 @@ configuration that `Upgrade: h2c` never reaches them
 - [X] T027 [US3] Add a superseded note to `specs/005-service-architecture/contracts/gateway-routes.md`,
   under the line about `Upgrade`/`HTTP2-Settings`: `> Spec 006: these headers are now cleared explicitly (proxy_set_header … ""), and services run httptools — see ../../006-service-perf-investigation/contracts/service-runtime.md.`
   Add a matching one-line note at the end of 005 `research.md` R10.
-- [ ] T028 [US3] Validate (quickstart V2):
+- [X] T028 [US3] Validate (quickstart V2):
   - Run `uv run pytest -q tests/unit/test_gateway_routes.py`.
   - Run the gateway-mode contract suite, exactly as in `quickstart.md` V2. Also check that
     `docker compose exec checkout sh -c 'echo $UVICORN_HTTP'` prints `httptools`.
@@ -368,7 +368,7 @@ configuration that `Upgrade: h2c` never reaches them
 **Independent Test**: Quickstart V7's read-through. Every number quoted in the READMEs
 appears in `investigation.md` or in this feature's `results/`.
 
-- [ ] T029 [P] [US4] In `load-client/reports/README.md`, Week 5 section, replace the paragraph
+- [X] T029 [P] [US4] In `load-client/reports/README.md`, Week 5 section, replace the paragraph
   from "**Throughput is 69 % (default) and 71 % (stress) of Week 4.**" through "None of them
   was applied to the graded runs." with a corrected explanation:
   - natively the 005 code matches the monolith (827 vs 818 tx/s)
@@ -381,7 +381,7 @@ appears in `investigation.md` or in this feature's `results/`.
   End with a link to
   `../../backend/specs/006-service-perf-investigation/investigation.md`.
   Keep the existing tables untouched.
-- [ ] T030 [P] [US4] In `backend/README.md`, add a short "Spec 006: hot-path latency" subsection
+- [X] T030 [P] [US4] In `backend/README.md`, add a short "Spec 006: hot-path latency" subsection
   (≤ 15 lines) next to the existing architecture or performance material, covering:
   - completion steps 3–6 are now one statement (`repos.checkout.complete_basket`) and why
     (one round trip held under the hot-SKU lock)
@@ -405,7 +405,7 @@ which T032 adds.
   - This writes `load-client/reports/006-hot-path-latency/report-*.json`.
   - Then add a "Week 6: spec 006 hot-path latency" table to `load-client/reports/README.md`, in
     the Week 5 table's format: one row per new report, plus the Week 5 rows for comparison.
-- [ ] T033 [P] Confirm `run_load_tests.sh` still defaults to `005-service-architecture` when
+- [X] T033 [P] Confirm `run_load_tests.sh` still defaults to `005-service-architecture` when
   `REPORT_DIR` is unset, by inspection (no run needed).
 - [ ] T034 Re-run the native SC-003 check on the final code:
   `APP=composite:app APPDIR_FLAG="--app-dir $PWD/$H/composite" caffeinate -i $H/native_exp.sh native100_006`.

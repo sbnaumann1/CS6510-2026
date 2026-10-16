@@ -111,16 +111,29 @@ splits it up:
 | Host → Docker Desktop port forwarding → gateway | 420.6 | 1.74 ms |
 | Load client inside the compose network → gateway | 470.5 | 1.54 ms |
 
-So about **0.2 ms** is Docker Desktop's host→VM port forwarding. The remaining **~0.55 ms** is:
-- the gateway hop (one more proxied HTTP request), plus
-- the services reaching PostgreSQL over TCP inside the VM. Week 4 used a Unix socket on the host.
+At 10 stations that A/B puts about 0.2 ms on port forwarding. The spec 006 investigation
+measured the gap at 100 stations, in one session, and found a different picture:
 
-The stress run's COMPLETE tail (p95 225 ms vs 64 ms in Week 4) is where that slower database
-path shows most: 100 stations queue on the same hot-SKU row locks, and each lock is now held
-for longer. The levers that would close the gap are listed in
-`backend/specs/005-service-architecture/research.md` R8–R10: sharing the PostgreSQL Unix socket
-into the containers, uvicorn's `httptools` parser behind the gateway, and running the client
-inside the network. None of them was applied to the graded runs.
+- **The 005 code itself is not slower.** Natively, in one process, it serves the stress
+  workload at 827 tx/s against the Week 4 monolith's 818.
+- **Docker Desktop's host→VM port forwarding is ≈ 44 % of the gap.** Running the client
+  inside the compose network took tx/s from 409 to 584. At 100 stations the forwarding
+  proxy is itself contended.
+- **VM overhead on the services and PostgreSQL is ≈ 52 %.** That is syscalls, the virtual
+  network and the extra container hop: a checkout request costs about 2× the CPU it costs
+  natively.
+- **Two suspects turned out not to matter.** PostgreSQL over TCP instead of the Unix socket
+  is ≈ 4 %, which is noise, so 005 R8 is not a lever. nginx's own processing is ≈ 0.
+
+Why a small per-hop cost turned into a 30–45 % loss: 68 % of baskets contain SKU-000001, and
+COMPLETE held that row lock across 3–4 client round trips. Completions serialize on it, so
+throughput is inversely proportional to round-trip latency, and the closed-loop client ties
+scan throughput to it. The stress run's COMPLETE tail (p95 225 ms vs 64 ms in Week 4) is that
+queue.
+
+The full measurements are in
+[`backend/specs/006-service-perf-investigation/investigation.md`](../../backend/specs/006-service-perf-investigation/investigation.md).
+Spec 006 then shortened the lock-holding critical section to one statement; see Week 6 below.
 
 ## Earlier reports
 
