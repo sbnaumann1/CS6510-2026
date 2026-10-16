@@ -1,0 +1,27 @@
+calls	total_ms	mean_ms	sd_ms	rows	shared_blks_hit	shared_blks_read	q
+9069	314410.1	34.669	52.920	9069	1661064	0	WITH v AS ( SELECT * FROM unnest(CAST($1::TEXT[] AS text[]), CAST($2::INTEGER[] AS int[])) AS v(sku, qty) ), locked AS MATERIALIZED ( SELECT s.sku, s.current_st
+7805	223217.6	28.599	44.104	7805	1335080	0	WITH v AS ( SELECT * FROM unnest(CAST($1::TEXT[] AS text[]), CAST($2::INTEGER[] AS int[])) AS v(sku, qty) ), locked AS MATERIALIZED ( SELECT s.sku, s.current_st
+96099	23855.2	0.248	0.566	96099	2333064	1	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status = $5 RETURNING id, ite
+82042	18826.6	0.229	0.499	82042	1992578	0	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status = $5 RETURNING id, ite
+178141	4723.9	0.027	0.178	178141	712564	0	SELECT $2 FROM ONLY "public"."catalog_item" x WHERE "sku" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+178141	1952.5	0.011	0.082	178141	725155	0	SELECT $2 FROM ONLY "public"."transaction" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+16874	1551.9	0.092	0.267	158348	184152	0	SELECT sku, count(*) AS qty FROM transaction_item WHERE transaction_id = $1 GROUP BY sku ORDER BY sku
+16874	1441.4	0.085	0.327	16874	105658	2	INSERT INTO transaction (station_id) VALUES ($1) RETURNING id, status, item_count, running_total_cents, started_at
+16874	1015.8	0.060	0.268	16874	70366	0	SELECT status, station_id, started_at FROM transaction WHERE id = $1 FOR UPDATE
+212524	939.0	0.004	0.036	0	0	0	BEGIN ISOLATION LEVEL READ COMMITTED
+296	196.8	0.665	0.852	183651	186478	0	SELECT id, sku FROM transaction_item WHERE id > $1 ORDER BY id LIMIT $2
+212170	107.4	0.001	0.013	0	0	0	COMMIT
+125	51.7	0.413	0.643	755	3	0	select extract($1 from now()), coalesce(state,$2), coalesce(wait_event_type,$3), coalesce(wait_event,$4), count(*) from pg_stat_activity where backend_type=$5 a
+281	45.5	0.162	0.288	281	1469	0	INSERT INTO popular_window_snapshot (id, window_size, slide_interval, window_start, window_end, computed_at, ranking) VALUES ($7, $1, $2, $3, $4, $5, CAST($6 AS
+120	13.6	0.113	0.183	180	2749	11	WITH RECURSIVE typeinfo_tree( oid, ns, name, kind, basetype, elemtype, elemdelim, range_subtype, attrtypoids, attrnames, depth) AS ( SELECT ti.oid, ti.ns, ti.na
+110	1.3	0.012	0.037	110	330	0	SELECT t.oid, t.typelem AS elemtype, t.typtype AS kind FROM pg_catalog.pg_type AS t WHERE t.oid = $1
+120	0.7	0.006	0.013	120	0	0	SELECT current_setting($1) AS cur, set_config($2, $3, $4) AS new
+282	0.5	0.002	0.005	282	0	0	SELECT now()
+120	0.4	0.003	0.001	120	0	0	SELECT set_config($2, $1, $3)
+1	0.3	0.305	0.000	0	91	0	SELECT c.sku, c.name, s.current_stock, COALESCE(a.triggered_at, now()) AS triggered_at FROM inventory_stock s JOIN catalog_item c USING (sku) LEFT JOIN LATERAL 
+1	0.1	0.118	0.000	1	0	0	select pg_stat_statements_reset()
+354	0.1	0.000	0.000	0	0	0	ROLLBACK
+56	0.1	0.002	0.001	56	0	0	SELECT $1
+1	0.1	0.070	0.000	1	0	0	select pg_stat_reset()
+1	0.0	0.049	0.000	1	5	0	SELECT window_size, slide_interval, window_start, window_end, computed_at, ranking FROM popular_window_snapshot WHERE id = $1
+(25 rows)

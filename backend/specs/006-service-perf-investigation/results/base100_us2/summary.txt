@@ -1,0 +1,14 @@
+base100_us2: tx/s=560.7 items/s=5925 scan mean/p50/p95/p99=9.52/6.50/26.55/49.95 complete mean/p50/p95/p99=66.73/37.34/224.5/355.3 cerr=0.0% | PASS — initial_stock - current_stock == completed line items, per SKU invariant exit=0
+  pg backends (avg per sample): idle/Client/ClientRead=30.3, active/Lock/tuple=15.1, active/Lock/transactionid=11.0, idle in transaction/Client/ClientRead=2.7, active/LWLock/LockManager=1.5, active/-/-=0.9, active/Client/ClientRead=0.7, idle/-/-=0.6
+  docker cpu% (median): analytics-1=19, catalog-1=6, checkout-1=486, gateway-1=70, inventory-1=5, postgres-1=190
+  host cpu% (median): vm=874, java=113
+calls	total_ms	mean_ms	sd_ms	rows	q
+9028	487552.3	54.004	80.111	9028	WITH v AS ( SELECT * FROM unnest(CAST($1::TEXT[] AS text[]), CAST($2::INTEGER[] AS int[])) AS v(sku, qty) ), locked AS MATERIALIZED ( SEL
+7883	392717.0	49.818	70.495	7883	WITH v AS ( SELECT * FROM unnest(CAST($1::TEXT[] AS text[]), CAST($2::INTEGER[] AS int[])) AS v(sku, qty) ), locked AS MATERIALIZED ( SEL
+95017	14309.2	0.151	0.413	95017	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status 
+83706	12877.0	0.154	0.375	83706	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status 
+178723	2554.8	0.014	0.138	178723	SELECT $2 FROM ONLY "public"."catalog_item" x WHERE "sku" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+178723	1471.5	0.008	0.069	178723	SELECT $2 FROM ONLY "public"."transaction" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+16911	1034.3	0.061	0.256	16911	INSERT INTO transaction (station_id) VALUES ($1) RETURNING id, status, item_count, running_total_cents, started_at
+16911	999.2	0.059	0.166	158876	SELECT sku, count(*) AS qty FROM transaction_item WHERE transaction_id = $1 GROUP BY sku ORDER BY sku
+209611	357	0	8737019	71	348162	192277

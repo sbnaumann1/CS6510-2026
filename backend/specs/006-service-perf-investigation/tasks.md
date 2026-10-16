@@ -396,31 +396,38 @@ which T032 adds.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T031 Graded stress run on the final code (quickstart V5):
+- [X] T031 Graded stress run on the final code (quickstart V5):
   `STATIONS=100 DURATION=120 STOCK=10000 caffeinate -i $H/run_exp.sh g_stress_006`.
   **Pass (SC-002)**: `COMPLETE` p95 ≤ 100 ms and items/s ≥ 5 800, invariant PASS, and the only
   `COMPLETE` errors are `409 INSUFFICIENT_STOCK` (no "timed out" or 5xx in `client.log`).
-- [ ] T032 Regenerate the graded reports (quickstart V7):
+  - **Result (`g_stress_006`)**:
+    - **Met:** items/s 6 690 (✅ ≥ 5 800); invariant PASS; only 409s; 0 timeouts.
+    - **Missed:** `COMPLETE` p95 was 127 ms (❌ > 100 ms; it was 242 ms before).
+    - **Cause:** the closed-loop shift described under T023 and in investigation.md
+      *Outcome*.
+- [X] T032 Regenerate the graded reports (quickstart V7):
   `REPORT_DIR=006-hot-path-latency caffeinate -i ./scripts/run_load_tests.sh all`.
   - This writes `load-client/reports/006-hot-path-latency/report-*.json`.
   - Then add a "Week 6: spec 006 hot-path latency" table to `load-client/reports/README.md`, in
     the Week 5 table's format: one row per new report, plus the Week 5 rows for comparison.
 - [X] T033 [P] Confirm `run_load_tests.sh` still defaults to `005-service-architecture` when
   `REPORT_DIR` is unset, by inspection (no run needed).
-- [ ] T034 Re-run the native SC-003 check on the final code:
+- [X] T034 Re-run the native SC-003 check on the final code:
   `APP=composite:app APPDIR_FLAG="--app-dir $PWD/$H/composite" caffeinate -i $H/native_exp.sh native100_006`.
   `COMPLETE` p95 must be ≤ 40 ms.
-- [ ] T035 Final gate:
+  - **Result (`native100_006`)**: ❌ 63 ms. US1 alone (`native100_us1`) gave 25 ms. US2 then
+    raised native tx/s 884 → 994 and moved queueing to the lock (see *Outcome*).
+- [X] T035 Final gate:
   - `uv run pytest -q` all green: 146 original tests plus the new ones, no original
     assertion edited (verify with `git diff origin/main -- tests/contract tests/integration/test_*.py`,
     which may show only *added* files and the T024 addition)
   - `uv run python scripts/check_boundaries.py` clean
   - `git status` shows no stray `.perf-runs/` output
-- [ ] T036 Append an "## Outcome (spec 006 implementation)" section to `investigation.md`:
+- [X] T036 Append an "## Outcome (spec 006 implementation)" section to `investigation.md`:
   - a before/after table: `*_pre` calibration vs `*_us1`, `*_us2`, `*_us3`, `g_stress_006`,
     `native100_006`, with tx/s, items/s, `COMPLETE` p50/p95/p99 and invariant
   - one line per SC-001…SC-005 saying met or not, with the number
-- [ ] T037 Copy the validation runs into `results/`, following the investigation's layout
+- [X] T037 Copy the validation runs into `results/`, following the investigation's layout
   (`summary.txt`, `report-*.json`, `pg_statements.tsv`, `pg_db.tsv` per run), from
   `$RUNS/<run>/` to `specs/006-service-perf-investigation/results/<run>/`. The runs are
   `smoke_006`, `base100_pre`, `native100_pre`, `g_stress_pre`, `base100_us1`, `native100_us1`,

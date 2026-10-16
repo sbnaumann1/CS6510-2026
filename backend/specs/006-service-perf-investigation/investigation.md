@@ -385,3 +385,91 @@ STATIONS=100 DURATION=120 STOCK=10000 $H/run_exp.sh g_base_stress
 ```
 
 Per-run summaries, statement statistics and the load-client reports are in `results/<run>/`.
+
+## Outcome (spec 006 implementation)
+
+**Date**: 2026-10-16, branch `006-hot-path-latency`.
+
+**How it was run**: every number below comes from one session, on battery power, with no
+sleep events.
+
+- `*_pre` is the calibration arm, with application code identical to `origin/main`. It
+  reproduced the investigation baseline: 414.5 vs 409 tx/s.
+- Each later arm adds one user story:
+  - `_us1`: single-statement completion
+  - `_us2`: plus autocommit start/scan
+  - `_us3` / `_006`: plus `httptools` behind the gateway; `_006` is the final code
+
+  Native runs use `h11`, so US3 does not apply to them.
+- Every run passed the invariant, with 0 deadlocks, 0 client timeouts and 0 5xx.
+- Per-transaction time comes from `harness/cycle.py` (closed-loop accounting from the
+  load-client report).
+
+### Compose, 100 stations / 30 s / ample stock
+
+| Run | tx/s | items/s | scan p50 / p95 | `COMPLETE` p50 / p95 / p99 | ms per tx: start + scans / complete / total | `BEGIN` per completion | Postgres CPU |
+|---|---|---|---|---|---|---|---|
+| `base100_pre` | 414.5 | 4 322 | 9.1 / 24.9 | 45 / 432 / 679 | 127 / 114 / **241** | 12.5 | 183 % |
+| `base100_us1` | **559.8** | 5 910 | 9.3 / 24.3 | 27 / **146** / 252 | 132 / 47 / **178** | 12.6 | 253 % |
+| `base100_us2` | 560.7 | 5 925 | 6.5 / 26.6 | 37 / 224 / 355 | 111 / 67 / **178** | **1.04** | 190 % |
+| `base100_us3` | **618.2** | 6 420 | 5.8 / 26.9 | 33 / 198 / 317 | 102 / 59 / **162** | 1.03 | 213 % |
+
+### Native (one process, Unix socket), 100 stations / 30 s / ample stock
+
+| Run | tx/s | items/s | `COMPLETE` p50 / p95 / p99 | ms per tx: start + scans / complete / total |
+|---|---|---|---|---|
+| `native100_pre` | 804.8 | 8 464 | 17 / 147 / 248 | 84 / 41 / **124** |
+| `native100_us1` | 884.3 | 9 258 | 11 / **25** / 35 | 101 / 12 / **113** |
+| `native100_006` | **993.6** | 10 419 | 15 / 63 / 104 | 78 / 22 / **101** |
+
+### Graded stress config (100 stations / 120 s / stock 10 000), compose
+
+| Run | tx/s | items/s | COMPLETE err % (409s) | `COMPLETE` p50 / p95 / p99 |
+|---|---|---|---|---|
+| `g_stress_pre` | 188.7 | 5 091 | 61.1 % | 16 / 242 / 514 |
+| `g_stress_006` | **219.1** | **6 690** | 65.6 % | 15 / 127 / 267 |
+| graded report `006-hot-path-latency/report-20261016-082910` | 224.5 | 6 804 | 65.4 % | — / 122 / — |
+
+The regenerated default-parameters report (10 stations / 60 s) gives 262.5 tx/s and
+5 615 items/s, against Week 5's 220.6 and 4 250.
+
+### Success criteria
+
+| Criterion | Target | Result | Met? |
+|---|---|---|---|
+| SC-001 compose tx/s | ≥ 500 | 618.2 (`base100_us3`) | ✅ |
+| SC-001 compose `COMPLETE` p95 | ≤ 200 ms | 197.6 ms (146 ms after US1 alone) | ✅ (barely) |
+| SC-002 graded items/s | ≥ 5 800 | 6 690 | ✅ |
+| SC-002 graded `COMPLETE` p95 | ≤ 100 ms | 127 ms | ❌ |
+| SC-003 native `COMPLETE` p95 | ≤ 40 ms | 63 ms (25 ms after US1 alone) | ❌ |
+| SC-004 `BEGIN` ≤ 1.1 × completions | ≤ 1.1 | 1.03 | ✅ |
+| SC-005 invariant / deadlocks / errors | PASS / 0 / 0 | PASS / 0 / 0 on every run | ✅ |
+
+### Reading the two misses
+
+**What US1 delivered.** US1 did what the investigation predicted: it shortened the hot-lock
+hold, and with it the whole transaction cycle (compose 241 → 178 ms, native 124 → 113 ms).
+
+**What US2 and US3 changed.** They then made the *non-lock* part of the cycle cheaper.
+
+- **Under compose, with US2:** throughput was still capped by the SKU-000001 lock, which is
+  hit by 68 % of baskets. So the freed time didn't shorten the cycle (178 → 178 ms). It
+  moved into the lock queue: stations got to `COMPLETE` sooner and waited there longer.
+- **Natively, and under compose with US3:** some of the saving became real throughput
+  (native +12 %, compose +10 %). The rest became more lock queueing.
+
+**Why the criteria were the wrong yardstick.** The `COMPLETE` p95 targets were set from the
+prototype runs, which changed only the completion and so held the rest of the cycle fixed.
+Under a closed-loop client whose bottleneck is a serial lock, faster *other* requests
+legitimately *raise* time spent waiting at the bottleneck. The end-to-end measures (tx/s,
+items/s, per-transaction cycle) improved at every step except US2 under compose, where they
+were flat. That step still cut Postgres CPU from 253 % to 190 % and per-request round trips.
+
+**Options** (a decision for the spec owner):
+
+1. Keep all three changes, and restate SC-002/SC-003 in throughput terms. They're met that
+   way: items/s +31 % graded, tx/s +23 % native.
+2. Revert US2 to recover US1-level `COMPLETE` p95 natively. That gives up native +12 % tx/s,
+   SC-004 and the CPU saving.
+3. Keep the code, and attack the remaining serial bottleneck itself. Contention on the
+   SKU-000001 row is now the limit, not round trips.

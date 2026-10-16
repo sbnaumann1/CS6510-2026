@@ -1,0 +1,18 @@
+smoke_006: tx/s=363.1 items/s=3794 scan mean/p50/p95/p99=2.02/1.88/3.14/4.31 complete mean/p50/p95/p99=4.33/4.03/7.0/9.1 cerr=0.0% | PASS — initial_stock - current_stock == completed line items, per SKU invariant exit=0
+  pg backends (avg per sample): idle/Client/ClientRead=13.2, idle in transaction/Client/ClientRead=2.0, active/-/-=0.6, idle in transaction/-/-=0.3, idle/-/-=0.2, active/Client/ClientRead=0.1, active/Lock/transactionid=0.1, active/LWLock/LockManager=0.0
+  docker cpu% (median): analytics-1=18, catalog-1=18, checkout-1=411, gateway-1=46, inventory-1=16, postgres-1=115
+  host cpu% (median): vm=773, java=94
+route             n   req_ms upstr_ms   gw_ms conn_ms  up p50  up p95  up p99
+start          3641    1.511    1.519  -0.008   0.001     1.0     3.0     3.0
+scan          38038    1.477    1.477  -0.000   0.000     1.0     3.0     3.0
+complete       3641    3.768    3.767   0.001   0.000     3.0     6.0     8.0
+calls	total_ms	mean_ms	sd_ms	rows	q
+38038	2701.3	0.071	0.056	38038	WITH tx AS ( UPDATE transaction SET item_count = item_count + $4, running_total_cents = running_total_cents + $1 WHERE id = $2 AND status =
+3641	1745.6	0.479	0.829	33928	SELECT sku FROM inventory_stock WHERE sku = ANY($1::TEXT[]) ORDER BY sku FOR UPDATE
+38038	241.4	0.006	0.007	38038	SELECT $2 FROM ONLY "public"."catalog_item" x WHERE "sku" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+38038	178.5	0.005	0.007	38038	SELECT $2 FROM ONLY "public"."transaction" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+3641	125.7	0.035	0.022	33928	SELECT sku, count(*) AS qty FROM transaction_item WHERE transaction_id = $1 GROUP BY sku ORDER BY sku
+45524	120.1	0.003	0.004	0	BEGIN ISOLATION LEVEL READ COMMITTED
+3641	99.7	0.027	0.026	3641	INSERT INTO transaction (station_id) VALUES ($1) RETURNING id, status, item_count, running_total_cents, started_at
+3641	90.0	0.025	0.020	3641	UPDATE transaction SET status = $3, completed_at = now(), total_amount_cents = $1 WHERE id = $2 RETURNING completed_at
+41199	143	0	1186809	46	68590	37770

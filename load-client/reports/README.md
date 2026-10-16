@@ -135,6 +135,32 @@ The full measurements are in
 [`backend/specs/006-service-perf-investigation/investigation.md`](../../backend/specs/006-service-perf-investigation/investigation.md).
 Spec 006 then shortened the lock-holding critical section to one statement; see Week 6 below.
 
+## Week 6 — Spec 006 hot-path latency, 2026-10-16
+
+These are the reports in [`006-hot-path-latency/`](./006-hot-path-latency/). The stack,
+services and configuration are the same as Week 5, with three code changes:
+- COMPLETE's critical section is one statement, so the hot-SKU locks wait on `COMMIT` only.
+- Start and scan run in autocommit, one round trip each.
+- The services use uvicorn's `httptools` parser behind the gateway.
+
+They were produced by `REPORT_DIR=006-hot-path-latency backend/scripts/run_load_tests.sh all`,
+on a fresh stack for each run, with the assignment's exact client flags. The host was on
+battery power, so compare these with each other and with the same-session numbers in the
+spec 006 investigation rather than with earlier weeks' absolute values.
+
+| Report | Scenario | Config | tx/s | items/s | COMPLETE err % | COMPLETE p95 | Invariant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `006-hot-path-latency/report-20261016-082652.json` | **Default parameters** | 10 stations / 60 s, stock 10 000 | 262.5 | 5 615 | 50.9 % | 4.8 ms | PASS |
+| `006-hot-path-latency/report-20261016-082910.json` | **Stress** | 100 stations / 120 s, stock 10 000 | 224.5 | 6 804 | 65.4 % | 121.6 ms | PASS |
+| *Week 5* `005-service-architecture/report-20261013-093301.json` | default | 10 stations / 60 s | 220.6 | 4 250 | 45.4 % | 6.0 ms | PASS |
+| *Week 5* `005-service-architecture/report-20261013-093519.json` | stress | 100 stations / 120 s | 190.9 | 5 242 | 61.7 % | 225.0 ms | PASS |
+
+Throughput is +19 % (default) and +18 % (stress) tx/s, and +32 % / +30 % items/s. Every error
+is a contract-defined `409 INSUFFICIENT_STOCK`. The higher error percentage is a consequence
+of the higher throughput: the hot SKUs sell out sooner within the fixed run time. Same-session
+before/after runs, with ample stock, are in the investigation's
+[Outcome](../../backend/specs/006-service-perf-investigation/investigation.md#outcome-spec-006-implementation).
+
 ## Earlier reports
 
 `report-20260824-*.json` and `report-20260916-185335.json` predate the backend and were produced
