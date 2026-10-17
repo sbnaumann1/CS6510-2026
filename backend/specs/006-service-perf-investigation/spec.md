@@ -1,5 +1,13 @@
 # Feature Specification: Hot-Path Latency Reduction for the Service Architecture
 
+> **Evidence branch.** The load/profiling harness (`harness/`) and the raw run results
+> (`results/`) mentioned in this document are not in this branch's tree. They are kept on
+> branch `worktree-perf-hot-path-latency` (commit `6987174`), under
+> `backend/specs/006-service-perf-investigation/`. To use them, run
+> `git restore --source=worktree-perf-hot-path-latency -- backend/specs/006-service-perf-investigation/harness backend/specs/006-service-perf-investigation/results`
+> and add `.perf-runs/` (the harness's output directory) to `backend/.gitignore` and
+> `backend/.dockerignore`.
+
 **Feature Branch**: `006-hot-path-latency`
 
 **Created**: 2026-10-16

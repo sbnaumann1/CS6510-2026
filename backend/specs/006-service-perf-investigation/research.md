@@ -1,5 +1,13 @@
 # Research: Hot-Path Latency Reduction (spec 006)
 
+> **Evidence branch.** The load/profiling harness (`harness/`) and the raw run results
+> (`results/`) mentioned in this document are not in this branch's tree. They are kept on
+> branch `worktree-perf-hot-path-latency` (commit `6987174`), under
+> `backend/specs/006-service-perf-investigation/`. To use them, run
+> `git restore --source=worktree-perf-hot-path-latency -- backend/specs/006-service-perf-investigation/harness backend/specs/006-service-perf-investigation/results`
+> and add `.perf-runs/` (the harness's output directory) to `backend/.gitignore` and
+> `backend/.dockerignore`.
+
 The measurements behind each decision are in [investigation.md](./investigation.md) (F1–F5).
 This file records the design decisions made from them. Every unknown in the plan's Technical
 Context is resolved here; none remain open.

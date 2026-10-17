@@ -1,2 +1,0 @@
-c005_native100: tx/s=808.8 items/s=8492 scan mean/p50/p95/p99=7.25/5.07/18.37/29.48 complete mean/p50/p95/p99=39.89/18.38/147.4/246.7 cerr=0.0% | PASS — initial_stock - current_stock == completed line items, per SKU invariant exit=0
-  pg backends (avg per sample): idle/Client/ClientRead=24.5, active/Lock/tuple=1.1, idle in transaction/Client/ClientRead=0.3, active/Lock/transactionid=0.1, active/-/-=0.1, active/Client/ClientRead=0.0, idle in transaction/-/-=0.0, idle/-/-=0.0

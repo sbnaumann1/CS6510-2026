@@ -1,5 +1,13 @@
 # Implementation Plan: Hot-Path Latency Reduction
 
+> **Evidence branch.** The load/profiling harness (`harness/`) and the raw run results
+> (`results/`) mentioned in this document are not in this branch's tree. They are kept on
+> branch `worktree-perf-hot-path-latency` (commit `6987174`), under
+> `backend/specs/006-service-perf-investigation/`. To use them, run
+> `git restore --source=worktree-perf-hot-path-latency -- backend/specs/006-service-perf-investigation/harness backend/specs/006-service-perf-investigation/results`
+> and add `.perf-runs/` (the harness's output directory) to `backend/.gitignore` and
+> `backend/.dockerignore`.
+
 **Branch**: `006-hot-path-latency` | **Date**: 2026-10-16 | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from `specs/006-service-perf-investigation/spec.md`, and the
@@ -117,8 +125,8 @@ specs/006-service-perf-investigation/
 ├── contracts/
 │   ├── completion-statement.md     # repos.checkout.complete_basket
 │   └── service-runtime.md          # UVICORN_HTTP, gateway header clearing, direct-port policy
-├── harness/                        # load/profiling harness (parametrized in this feature)
-├── results/                        # investigation runs (+ this feature's validation runs)
+├── harness/                        # load/profiling harness: on the evidence branch, not in this tree
+├── results/                        # run results: on the evidence branch, not in this tree
 └── tasks.md                        # Phase 2 (/speckit-tasks; not created here)
 ```
 
