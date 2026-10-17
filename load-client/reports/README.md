@@ -111,16 +111,55 @@ splits it up:
 | Host → Docker Desktop port forwarding → gateway | 420.6 | 1.74 ms |
 | Load client inside the compose network → gateway | 470.5 | 1.54 ms |
 
-So about **0.2 ms** is Docker Desktop's host→VM port forwarding. The remaining **~0.55 ms** is:
-- the gateway hop (one more proxied HTTP request), plus
-- the services reaching PostgreSQL over TCP inside the VM. Week 4 used a Unix socket on the host.
+At 10 stations that A/B puts about 0.2 ms on port forwarding. The spec 006 investigation
+measured the gap at 100 stations, in one session, and found a different picture:
 
-The stress run's COMPLETE tail (p95 225 ms vs 64 ms in Week 4) is where that slower database
-path shows most: 100 stations queue on the same hot-SKU row locks, and each lock is now held
-for longer. The levers that would close the gap are listed in
-`backend/specs/005-service-architecture/research.md` R8–R10: sharing the PostgreSQL Unix socket
-into the containers, uvicorn's `httptools` parser behind the gateway, and running the client
-inside the network. None of them was applied to the graded runs.
+- **The 005 code itself is not slower.** Natively, in one process, it serves the stress
+  workload at 827 tx/s against the Week 4 monolith's 818.
+- **Docker Desktop's host→VM port forwarding is ≈ 44 % of the gap.** Running the client
+  inside the compose network took tx/s from 409 to 584. At 100 stations the forwarding
+  proxy is itself contended.
+- **VM overhead on the services and PostgreSQL is ≈ 52 %.** That is syscalls, the virtual
+  network and the extra container hop: a checkout request costs about 2× the CPU it costs
+  natively.
+- **Two suspects turned out not to matter.** PostgreSQL over TCP instead of the Unix socket
+  is ≈ 4 %, which is noise, so 005 R8 is not a lever. nginx's own processing is ≈ 0.
+
+Why a small per-hop cost turned into a 30–45 % loss: 68 % of baskets contain SKU-000001, and
+COMPLETE held that row lock across 3–4 client round trips. Completions serialize on it, so
+throughput is inversely proportional to round-trip latency, and the closed-loop client ties
+scan throughput to it. The stress run's COMPLETE tail (p95 225 ms vs 64 ms in Week 4) is that
+queue.
+
+The full measurements are in
+[`backend/specs/006-service-perf-investigation/investigation.md`](../../backend/specs/006-service-perf-investigation/investigation.md).
+Spec 006 then shortened the lock-holding critical section to one statement; see Week 6 below.
+
+## Week 6 — Spec 006 hot-path latency, 2026-10-16
+
+These are the reports in [`006-hot-path-latency/`](./006-hot-path-latency/). The stack,
+services and configuration are the same as Week 5, with three code changes:
+- COMPLETE's critical section is one statement, so the hot-SKU locks wait on `COMMIT` only.
+- Start and scan run in autocommit, one round trip each.
+- The services use uvicorn's `httptools` parser behind the gateway.
+
+They were produced by `REPORT_DIR=006-hot-path-latency backend/scripts/run_load_tests.sh all`,
+on a fresh stack for each run, with the assignment's exact client flags. The host was on
+battery power, so compare these with each other and with the same-session numbers in the
+spec 006 investigation rather than with earlier weeks' absolute values.
+
+| Report | Scenario | Config | tx/s | items/s | COMPLETE err % | COMPLETE p95 | Invariant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `006-hot-path-latency/report-20261016-082652.json` | **Default parameters** | 10 stations / 60 s, stock 10 000 | 262.5 | 5 615 | 50.9 % | 4.8 ms | PASS |
+| `006-hot-path-latency/report-20261016-082910.json` | **Stress** | 100 stations / 120 s, stock 10 000 | 224.5 | 6 804 | 65.4 % | 121.6 ms | PASS |
+| *Week 5* `005-service-architecture/report-20261013-093301.json` | default | 10 stations / 60 s | 220.6 | 4 250 | 45.4 % | 6.0 ms | PASS |
+| *Week 5* `005-service-architecture/report-20261013-093519.json` | stress | 100 stations / 120 s | 190.9 | 5 242 | 61.7 % | 225.0 ms | PASS |
+
+Throughput is +19 % (default) and +18 % (stress) tx/s, and +32 % / +30 % items/s. Every error
+is a contract-defined `409 INSUFFICIENT_STOCK`. The higher error percentage is a consequence
+of the higher throughput: the hot SKUs sell out sooner within the fixed run time. Same-session
+before/after runs, with ample stock, are in the investigation's
+[Outcome](../../backend/specs/006-service-perf-investigation/investigation.md#outcome-spec-006-implementation).
 
 ## Earlier reports
 

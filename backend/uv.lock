@@ -153,7 +153,7 @@ wheels = [
 
 [[package]]
 name = "checkout-data"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/checkout_data" }
 dependencies = [
     { name = "asyncpg" },

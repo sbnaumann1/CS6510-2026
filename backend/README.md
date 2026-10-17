@@ -262,11 +262,27 @@ the report into `../load-client/reports/005-service-architecture/`, saves the co
 
 Every error is a contract-defined `409 INSUFFICIENT_STOCK` once hot SKUs sell out.
 
-Throughput is about 70 % of Week 4's native single-process run. Each request now pays a
-Docker Desktop port-forwarding hop and a gateway hop, and the services reach the database
-over TCP inside the VM. These results are therefore not directly comparable to Weeks 1–4.
-The measured breakdown is in
+Throughput is about 70 % of Week 4's native single-process run. These results are not
+directly comparable to Weeks 1–4. The cause is the deployment, not the 005 code, which is
+as fast as the monolith natively. Docker Desktop port forwarding and VM overhead slow every
+round trip, and the hot-SKU lock turns that into lost throughput. The measured breakdown is in
 [`../load-client/reports/README.md`](../load-client/reports/README.md#week-5--domain-services-under-docker-compose-2026-10-13).
+
+### Spec 006: hot-path latency
+
+The [spec 006 investigation](specs/006-service-perf-investigation/investigation.md) showed
+that throughput is capped by the hot-SKU stock lock, and that the lock's hold time is client
+round trips. Three changes follow from it ([plan](specs/006-service-perf-investigation/plan.md)):
+
+- **Completion**: the critical section is one statement (`repos.checkout.complete_basket`).
+  The locks wait on `COMMIT` only, instead of four to five round trips.
+- **Start and scan**: these use autocommit sessions (`checkout_data.get_autocommit_session`).
+  Their single statement makes one round trip.
+- **Service images**: they run uvicorn's `httptools` parser (`UVICORN_HTTP`, set it to `h11`
+  to revert). The gateway clears the client's `Upgrade: h2c` explicitly.
+
+Reports regenerated with these changes are under `../load-client/reports/006-hot-path-latency/`
+(`REPORT_DIR=006-hot-path-latency ./scripts/run_load_tests.sh all`).
 
 ## Inspect stock
 
@@ -312,8 +328,8 @@ docker compose logs analytics | grep -E 'pipeline|window published|gap skipped' 
 | --- | --- | --- |
 | Routing | nginx, by path: `= /items` → catalog, `/transactions` → checkout, `/inventory/` → inventory, `/analytics/` → analytics, everything else → checkout (same 404 body as before) | `gateway/nginx.conf` |
 | Catalog | Each service that needs it loads its own copy at startup; `GET /items` is a pre-rendered body in ascending SKU order | `checkout_data/catalog.py`, `catalog_service` |
-| Scan | One CTE: bump the transaction's counters, insert the line, `RETURNING` both | `checkout_service/service.py` → `repos/checkout.py` |
-| Completion | One DB transaction: lock the tx row, lock stock rows **in SKU order**, one conditional batched `UPDATE ... WHERE current_stock >= qty`, alert rows on threshold crossing. A short count rolls back as `409` | `checkout_service/service.py`, `alerts.py` |
+| Scan | One CTE: bump the transaction's counters, insert the line, `RETURNING` both. Runs in autocommit, so it is one round trip with no `BEGIN`/`COMMIT` (start does the same) | `checkout_service/service.py` → `repos/checkout.py` |
+| Completion | One DB transaction: lock the tx row, read the basket, then **one statement** (`complete_basket`) that locks the stock rows **in SKU order**, checks every quantity, decrements, inserts alert rows on threshold crossing and finalizes — or modifies nothing, which answers `409`. Only `COMMIT` waits on a round trip while the hot-SKU locks are held | `checkout_service/service.py` → `repos/checkout.py` |
 | Never oversell | The conditional `UPDATE`; `CHECK (current_stock >= 0)` as a backstop. Correct across Checkout replicas because the locks are in the database | `repos/checkout.py` |
 | Low-stock report | Live stock joined to the latest alert per SKU | `inventory_service` → `repos/inventory.py` |
 | Popular items | Persistent pipeline tailing `transaction_item`; one snapshot row every worker reads | `analytics_service/pipeline.py`, `supervisor.py`, `popular_items.py` |

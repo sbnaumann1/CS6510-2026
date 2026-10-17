@@ -1,6 +1,6 @@
 [project]
 name = "checkout-data"
-version = "0.5.0"
+version = "0.6.0"
 description = "Shared data-access library: schema, connections, table ownership, per-service repositories"
 requires-python = ">=3.11"
 dependencies = [

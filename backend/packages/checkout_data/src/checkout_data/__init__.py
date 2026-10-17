@@ -1,7 +1,8 @@
 """Shared data-access library — the only place the services are coupled.
 
-Async engine, session factory, the advisory-lock helper (001 research R1, R6) and
-a health ping. Repository functions live in `checkout_data.repos.<service>`, one
+Async engine, session factories, the advisory-lock helper (001 research R1, R6) and
+a health ping. The autocommit session factory is only for routes whose database work
+is one atomic statement: it skips the BEGIN/COMMIT round trips (spec 006 research R2). Repository functions live in `checkout_data.repos.<service>`, one
 module per consuming service; table ownership is declared in
 `checkout_data.ownership` (005 research R2, R12).
 """
@@ -39,12 +40,26 @@ SessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     engine, expire_on_commit=False, autoflush=False
 )
 
+# Same pool as `engine`; SQLAlchemy restores the default isolation level when a
+# connection is returned, so transactional sessions on that pool stay transactional.
+autocommit_engine: AsyncEngine = engine.execution_options(isolation_level="AUTOCOMMIT")
+
+AutocommitSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
+    autocommit_engine, expire_on_commit=False, autoflush=False
+)
+
 _PING = text("SELECT 1")
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency — one session per request."""
     async with SessionLocal() as session:
+        yield session
+
+
+async def get_autocommit_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency for single-statement routes: each statement commits on its own."""
+    async with AutocommitSessionLocal() as session:
         yield session
 
 

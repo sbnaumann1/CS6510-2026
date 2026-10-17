@@ -33,6 +33,8 @@ guarantees that, and the route-parity test checks it.
 
 - The method, path, query string and body are forwarded unchanged. Upstream responses, error bodies included, are passed through unchanged.
 - Upstream connections use HTTP/1.1 keepalive (`proxy_http_version 1.1`, `Connection ""`, `keepalive 64`). The client's `Upgrade`/`HTTP2-Settings` headers are not forwarded.
+
+  > Spec 006: these headers are now cleared explicitly (`proxy_set_header … ""`), and the services run httptools. See [006 service-runtime](../../006-service-perf-investigation/contracts/service-runtime.md).
 - Upstreams are declared with `resolve`, so a restarted container's new IP is picked up within 5 s.
 
 ## Behavior when an upstream is down
