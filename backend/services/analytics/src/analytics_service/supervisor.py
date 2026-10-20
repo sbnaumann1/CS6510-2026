@@ -2,8 +2,7 @@
 
 Lifecycle (specs/005-service-architecture/data-model.md §3):
   standby       — retry the leader lock every 2 s until this process holds it
-  bootstrapping — read max scan id from the shared DB; b0 = latest slide boundary;
-                  tail from b0 - window so the first window published is complete
+  bootstrapping — tail from b0 - window so the first window published is complete
   streaming     — five filters run until shutdown; windows are published as they slide
   restarting    — any filter error: cancel all filters, back off 1 s, bootstrap again
 

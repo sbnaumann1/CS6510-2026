@@ -67,6 +67,7 @@ flowchart LR
     tools -.->|"invariant check"| db
 ```
 
+
 How to read it:
 - **Thick arrows** are writes. **Dotted arrows** are reads.
 - There are **no arrows between services**. Each service's only connection is to the shared

@@ -24,23 +24,21 @@ _INSERT_TX = text(
 # Update the denormalized counters, insert the line, and return both in one
 # round trip (001 research R9). `scan_seq` is the global scan sequence feeding
 # the analytics window.
-_SCAN = text(
-    """
+_SCAN = text("""
 WITH tx AS (
-  UPDATE transaction
-     SET item_count = item_count + 1,
-         running_total_cents = running_total_cents + :price_cents
-   WHERE id = :tx_id AND status = 'OPEN'
-  RETURNING id, item_count, running_total_cents
+    UPDATE transaction
+        SET item_count = item_count + 1,
+            running_total_cents = running_total_cents + :price_cents
+    WHERE id = :tx_id AND status = 'OPEN'
+    RETURNING id, item_count, running_total_cents
 ), ins AS (
-  INSERT INTO transaction_item (transaction_id, sku, unit_price_cents)
-  SELECT id, :sku, :price_cents FROM tx
-  RETURNING id
+    INSERT INTO transaction_item (transaction_id, sku, unit_price_cents)
+    SELECT id, :sku, :price_cents FROM tx
+    RETURNING id
 )
 SELECT tx.item_count, tx.running_total_cents, (SELECT id FROM ins) AS scan_seq
-  FROM tx
-"""
-)
+    FROM tx
+""")
 
 _TX_STATUS = text("SELECT status FROM transaction WHERE id = :tx_id")
 
@@ -67,8 +65,7 @@ _BASKET = text(
 # goes negative. When `ok` is false nothing is modified and `short` lists the SKUs
 # that are missing or short. The alert rule fires once per descent (001 FR-006).
 # Arrays rather than a VALUES list keep one statement text for every basket size.
-_COMPLETE_BASKET = text(
-    """
+_COMPLETE_BASKET = text("""
 WITH v AS (
   SELECT * FROM unnest(CAST(:skus AS text[]), CAST(:qtys AS int[])) AS v(sku, qty)
 ),
@@ -102,8 +99,7 @@ SELECT (SELECT ok FROM ok) AS ok,
        (SELECT completed_at FROM fin) AS completed_at,
        (SELECT array_agg(v.sku ORDER BY v.sku) FROM v LEFT JOIN locked l USING (sku)
          WHERE l.sku IS NULL OR l.current_stock < v.qty) AS short
-"""
-).bindparams(
+""").bindparams(
     bindparam("skus", type_=ARRAY(Text)),
     bindparam("qtys", type_=ARRAY(Integer)),
 )
