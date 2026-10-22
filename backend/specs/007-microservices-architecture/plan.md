@@ -1,0 +1,147 @@
+# Implementation Plan: Microservices Architecture (Database per Service, Coordinated Cross-Service Updates)
+
+**Branch**: `007-microservices-architecture` | **Date**: 2026-10-21 | **Spec**: [spec.md](./spec.md)
+
+**Input**: Feature specification from `/specs/007-microservices-architecture/spec.md`
+
+## Summary
+
+Spec 005's four domain services stop sharing one PostgreSQL database and the `checkout_data`
+library. Each gets **its own PostgreSQL instance on its own private network** and its own
+data-access code. The frozen contract, the nginx gateway's public routes and the unmodified load
+client do not change.
+
+Three things were free under a shared database and now need design:
+
+1. **Completing a transaction** touches Checkout and Inventory. It becomes an **orchestrated
+   saga** driven by Checkout: mark `COMPLETING` → Inventory `reserve` (idempotent, one local
+   transaction) → mark `COMPLETED`, with a `release` compensation, a durable `completion`
+   record, and a recovery loop. See [research R1–R4](./research.md) and
+   [contracts/completion-saga.md](./contracts/completion-saga.md).
+2. **Feeding Analytics** is **choreography**: Checkout publishes each scan through a
+   cursor-based relay over its own scan table to Analytics' idempotent ingest endpoint. Analytics
+   was already driven by scans, not sales, so the contract tests require this. See
+   [research R5](./research.md).
+3. **Needing another service's reference data** (prices, item names) uses Catalog's *public*
+   `GET /items`, cached in memory as a snapshot. See [research R6](./research.md).
+
+Cross-service calls are plain HTTP/JSON on a private `mesh` network with timeouts, bounded
+retries and a propagated request id. No broker is introduced ([research R7](./research.md)).
+
+## Technical Context
+
+**Language/Version**: Python 3.11 (unchanged)
+
+**Primary Dependencies**: FastAPI + uvicorn (uvloop, httptools), SQLAlchemy 2 async + asyncpg, orjson (all unchanged); **httpx** added to every service image for service-to-service calls; nginx for the gateway (unchanged)
+
+**Storage**: PostgreSQL 17, **four instances**: `catalog-db`, `checkout-db`, `inventory-db`, `analytics-db`; one schema, one role, one private network each
+
+**Testing**: pytest + pytest-asyncio against native PostgreSQL (four `*_test` databases); in-process service apps joined by a fault-injecting ASGI transport; compose-level failure drills; the graded load client
+
+**Target Platform**: Docker Compose on Docker Desktop (macOS), as in 005
+
+**Project Type**: multi-service web backend (four services + gateway + per-service one-shot seeds)
+
+**Performance Goals**: stress run (100 stations, 120 s) ≥ 70 % of 005's throughput, with the shortfall explained if missed (SC-009); popular-items catches up within 30 s of Analytics recovering (SC-006)
+
+**Constraints**: contract unchanged; stock never negative; no cross-database transactions; no service ever connects to another's database; every cross-service call has a deadline
+
+**Scale/Scope**: 4 services, 4 databases, 1 cross-service write flow (completion), 1 async feed (scans), 2000-item catalog; load client up to 100 stations
+
+## Constitution Check
+
+*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+
+`.specify/memory/constitution.md` is still the unfilled template, so there are no ratified
+principles to gate against. In place of it, this plan holds itself to the standards the earlier
+specs recorded:
+
+| Standard (source) | Status |
+| --- | --- |
+| Frozen external contract and unmodified load client (001, 005 FR-001) | PASS: public routes unchanged; internal routes are not routed by the gateway |
+| Graded invariant: `initial_stock − final_stock == completed line items`, never negative (001) | PASS: kept; verified across stores by an HTTP-based checker ([R10](./research.md)) |
+| Boundary rules enforced by an automated check (005) | PASS: rewritten for database-per-service ([contracts/service-boundaries.md](./contracts/service-boundaries.md)) |
+| Spec 006 hot-SKU finding: never hold the hot stock lock across client round trips | PASS: Inventory holds it for one statement plus COMMIT, then releases it before Checkout's finalize ([R2](./research.md)) |
+
+Post-design re-check: PASS. No violations, so Complexity Tracking is empty.
+
+## Project Structure
+
+### Documentation (this feature)
+
+```text
+specs/007-microservices-architecture/
+├── plan.md                          # This file
+├── research.md                      # Phase 0: decisions with rationale and alternatives
+├── data-model.md                    # Phase 1: per-service schemas and state machines
+├── quickstart.md                    # Phase 1: validation scenarios
+├── contracts/
+│   ├── internal-apis.md             # service-to-service HTTP contracts
+│   ├── completion-saga.md           # steps, states, compensation, recovery
+│   ├── gateway-routes.md            # public routes, blocked /internal, request id
+│   ├── compose-topology.md          # units, networks, credentials, startup order
+│   └── service-boundaries.md        # rules enforced by scripts/check_boundaries.py
+├── checklists/requirements.md
+└── tasks.md                         # Phase 2 (/speckit-tasks, not created here)
+```
+
+### Source Code (backend/)
+
+```text
+backend/
+├── compose.yaml                     # 4 DBs, 4 seeds, 4 services, gateway, tools; networks per topology contract
+├── compose.test.yaml
+├── gateway/                         # nginx.conf: + /internal/ blocked, + X-Request-ID
+├── packages/
+│   └── checkout_web/                # KEPT, data-free only: errors, request parsing, app factory,
+│                                    #   /healthz, money helpers, NEW client.py (timeouts, retries,
+│                                    #   request-id propagation). checkout_data is DELETED.
+├── services/
+│   ├── catalog/src/catalog_service/
+│   │   ├── main.py  api.py
+│   │   ├── db.py  models.py  repo.py  seed.py        # own data layer (was shared checkout_data)
+│   ├── checkout/src/checkout_service/
+│   │   ├── main.py  api.py  service.py
+│   │   ├── db.py  models.py  repo.py  seed.py
+│   │   ├── saga.py                  # completion orchestrator + compensation
+│   │   ├── recovery.py              # resumes/compensates stuck completions
+│   │   ├── scan_relay.py            # cursor-based scan feed to Analytics
+│   │   ├── catalog_client.py  inventory_client.py  analytics_client.py
+│   │   └── sweeper.py
+│   ├── inventory/src/inventory_service/
+│   │   ├── main.py  api.py  low_stock.py
+│   │   ├── reserve.py               # idempotent reserve/release statements
+│   │   ├── db.py  models.py  repo.py  seed.py
+│   │   └── catalog_client.py
+│   └── analytics/src/analytics_service/
+│       ├── main.py  api.py  popular_items.py  supervisor.py  pipeline.py   # pipeline reused from 005
+│       ├── ingest.py                # POST /internal/scans, idempotent
+│       ├── db.py  models.py  repo.py  seed.py
+│       └── catalog_client.py
+├── scripts/
+│   ├── check_boundaries.py          # rewritten rules
+│   ├── verify_invariant.py          # now calls internal report endpoints on all services
+│   ├── run_load_tests.sh            # REPORT_DIR default 007-microservices-architecture
+│   └── lock_services.sh             # adds httpx to each service's lock
+└── tests/
+    ├── contract/                    # assertions unchanged
+    ├── integration/                 # existing + saga, relay, recovery
+    ├── failure/                     # fault-injection per saga step (FR-023)
+    ├── unit/
+    ├── _dispatch.py                 # gateway twin + inter-service ASGI mesh with fault hooks
+    └── conftest.py                  # four databases instead of one
+```
+
+**Structure Decision**: Keep 005's layout (one directory per service, shared `checkout_web` for
+cross-cutting code only) and replace the shared data library with a data layer inside each
+service. Each service remains an independent installable package with its own lock file and
+image. This is the smallest change that satisfies FR-005 and FR-006.
+
+## Complexity Tracking
+
+No constitution violations to justify. Two choices add moving parts, both required by the spec:
+
+| Addition | Why Needed | Simpler Alternative Rejected Because |
+| --- | --- | --- |
+| `completion` table and recovery loop in Checkout | FR-015: a crash mid-saga must not strand a transaction | Relying on the client to retry leaves stock reserved for abandoned shoppers |
+| Scan relay with persisted cursor | FR-016/009: Analytics must receive every scan exactly once in effect without blocking scans | A synchronous call per scan adds a hop to the hottest path and couples Checkout availability to Analytics |
