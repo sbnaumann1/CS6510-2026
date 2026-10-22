@@ -28,7 +28,7 @@ all take effect or are all undone. The external behavior the load client sees do
 | **Catalog** | What can be sold, and at what price | `GET /items` | Item catalog (SKU, name, price), held in a private read-only file |
 | **Checkout** | Running a customer's basket from start to payment | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | Transactions and their scanned items; the record of each multi-service completion in progress |
 | **Inventory** | Knowing how much of each item is on hand, and what needs restocking | `GET /inventory/low-stock` | Stock levels and low-stock alerts |
-| **Analytics** | Understanding customer buying behavior | `GET /analytics/popular-items` | Its own copy of scan history it needs, and popular-items snapshots |
+| **Analytics** | Understanding customer buying behavior | `GET /analytics/popular-items` | Nothing persisted: a rolling in-memory window of the most recent scans and the current ranking, both derived from Checkout's scans |
 
 An **API Gateway** sits in front of all four on the single public address the load client targets.
 It routes each request to the owning microservice and holds no business data. It is infrastructure,
@@ -40,7 +40,7 @@ Which request touches which stores:
 | --- | --- |
 | `GET /items` | Catalog |
 | `POST /transactions` | Checkout |
-| `POST /transactions/{id}/items` | Checkout (needs the item's price from Catalog); the scan then reaches Analytics asynchronously |
+| `POST /transactions/{id}/items` | Checkout (needs the item's price from Catalog); Analytics reads the scan from Checkout asynchronously |
 | `POST /transactions/{id}/complete` | Checkout (finalize), Inventory (reduce stock, raise low-stock alerts) |
 | `GET /inventory/low-stock` | Inventory (item names from Catalog) |
 | `GET /analytics/popular-items` | Analytics (item names from Catalog) |
@@ -48,7 +48,9 @@ Which request touches which stores:
 Completing a transaction is the one request that must update more than one store before it
 answers. It is the coordination problem this feature must solve. Analytics is fed separately:
 popular-items has always counted every scan, whether or not its transaction is completed, so
-Analytics receives scans as they happen, asynchronously and without blocking the shopper.
+Analytics **reads** new scans from Checkout continuously, asynchronously and without blocking the
+shopper. Checkout does not know Analytics exists. Analytics keeps only what it can recompute from
+Checkout's scans, so it needs no database of its own.
 
 ## Clarifications
 
@@ -57,7 +59,8 @@ Analytics receives scans as they happen, asynchronously and without blocking the
 - Q: Which coordination style? → A: Left open by the assignment. This spec requires the *outcomes* (all-or-nothing visible results, no lost or double-applied updates). The plan will choose orchestration or choreography and justify it.
 - Q: Is the external contract still frozen? → A: Yes. `spec.yaml` and the unmodified load client are unchanged.
 - Q: Does one shared database server with separate private schemas count as "its own data store"? → A: No. Each microservice gets its own separately running data store instance that is not reachable by any other microservice.
-- Q: Does every store have to be a database server? → A: No. Catalog's data is a fixed reference list that never changes after seeding, so its private store is a read-only file that only Catalog (and its seed step) can open. Checkout, Inventory and Analytics change data under load and keep database instances.
+- Q: Does every store have to be a database server? → A: No. Catalog's data is a fixed reference list that never changes after seeding, so its private store is a read-only file that only Catalog (and its seed step) can open. Checkout and Inventory change data under load and keep database instances.
+- Q: Does Analytics need a store at all? → A: No. Popular-items is derived from Checkout's scans, which are already durable there. Analytics keeps a rolling window in memory and rebuilds it from Checkout after a restart. Only one Analytics instance runs, so no leader election is needed.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -121,7 +124,7 @@ each forced to fail or time out at each step. After each run, check that the sto
 1. **Given** a transaction with scanned items and enough stock, **When** it is completed, **Then** Checkout shows it completed and Inventory shows stock reduced by exactly the scanned units.
 2. **Given** a basket that needs more stock than Inventory holds, **When** completion is attempted, **Then** the shopper gets the contract's insufficient-stock conflict, no stock changes, and the transaction is not marked completed.
 3. **Given** Inventory has reduced stock but a later step fails, **When** the failure is detected, **Then** the stock reduction is reversed and the transaction is not left half-completed.
-4. **Given** Analytics is down while shoppers scan and complete, **When** it recovers, **Then** it receives every scan made meanwhile exactly once, and popular-items reflects them.
+4. **Given** Analytics is down while shoppers scan and complete, **When** it recovers, **Then** it reads Checkout's scans, counts every scan made meanwhile exactly once, and popular-items reflects them.
 5. **Given** a completion request is retried or runs twice at once (client timeout, duplicate delivery), **When** it is processed, **Then** the stock is reduced once, not twice. A retry while the first is still in flight converges on the same single outcome, and a retry after completion gets the contract's existing "not open" conflict.
 6. **Given** the system is stopped in the middle of a completion and restarted, **When** it comes back, **Then** the interrupted completion is finished or rolled back, never left in limbo.
 
@@ -169,10 +172,12 @@ and the invariant passes.
 - **A microservice is down**: the Gateway returns a gateway-unavailable error in the contract's error shape for that microservice's routes only. Requests that need it as a dependency fail cleanly or complete later, as described below.
 - **Catalog is down during a scan**: Checkout prices from a cached snapshot of the catalog, so scans keep working once it has been loaded. If Checkout has never loaded the catalog, the scan fails with a clean error and nothing is recorded. Completion never needs Catalog, because Checkout stores the price it saw at scan time.
 - **Inventory is down during completion**: completion fails cleanly. The transaction stays open so the shopper can retry.
-- **Analytics is down**: scanning and completing continue unaffected. Scans are delivered to Analytics later, exactly once in effect. Popular-items is allowed to be briefly stale.
+- **Analytics is down**: scanning and completing continue unaffected. When Analytics returns it rebuilds its window from Checkout's scans and counts each scan once. Popular-items is allowed to be briefly stale.
+- **Analytics restarts while Checkout is down**: Analytics has no store of its own, so it cannot rebuild until Checkout returns. Popular-items answers with the empty window in the meantime. This is accepted: the data is derived and recomputed within seconds of Checkout's return.
+- **Checkout is down while Analytics runs**: Analytics keeps serving its last ranking from memory and resumes reading when Checkout returns.
 - **Two shoppers complete baskets competing for the last units**: exactly the units available are sold. The loser gets the insufficient-stock conflict. Stock never goes negative.
 - **Duplicate or retried completion**: no double stock reduction. Concurrent duplicates converge on one outcome. A repeat after completion gets the contract's "not open" conflict.
-- **Duplicate delivery of a scan to Analytics**: counted once.
+- **Analytics reads the same scan twice** (for example after a retry): counted once.
 - **A coordination step succeeds but its acknowledgement is lost**: retrying the step has no additional effect.
 - **A microservice crashes mid-completion**: after restart, the in-progress completion is resumed or compensated. No transaction stays permanently "completing".
 - **Abandoned transactions**: the sweep that cancels stale transactions stays within Checkout's own data. It never leaves stock reserved, because stock is only reduced at completion.
@@ -199,7 +204,7 @@ and the invariant passes.
 
 **Database per service**
 
-- **FR-007**: Each microservice MUST own a separate private data store, and no store MUST be shared by two microservices. A store MUST be a separately running database instance where the data changes at runtime (Checkout, Inventory, Analytics). Catalog's fixed reference data MAY be a read-only file private to Catalog.
+- **FR-007**: Each microservice MUST own a separate private data store, and no store MUST be shared by two microservices. A store MUST be a separately running database instance where the data changes at runtime and cannot be recomputed (Checkout, Inventory). Catalog's fixed reference data MAY be a read-only file private to Catalog. Analytics holds only derived data that it can rebuild from Checkout's scans, so it MAY keep that data in memory with no persistent store.
 - **FR-008**: A microservice MUST be able to access only its own data store. Other microservices' stores MUST be unreachable from it by network position, credentials or file access, not merely by convention.
 - **FR-009**: A microservice that needs another's data MUST obtain it through that microservice's public interface, never by reading its store. Any copy it keeps (for example, a price captured at scan time) MUST be treated as a snapshot, with its owner and source documented.
 - **FR-010**: Seeding MUST populate each store with only the data its microservice owns (catalog items for Catalog, initial stock for Inventory), as an operator step before the microservices serve traffic.
@@ -211,7 +216,7 @@ and the invariant passes.
 - **FR-013**: Every coordination step MUST be idempotent. Retrying or redelivering a step MUST NOT apply its effect twice.
 - **FR-014**: Stock MUST never go negative, and the total units sold MUST equal the total units scanned in completed transactions, under concurrent completions.
 - **FR-015**: A completion interrupted by a crash or lost message MUST be resumed to completion or compensated after restart. No transaction may remain indefinitely in an in-between state.
-- **FR-016**: Delivery of scans to Analytics MUST NOT block or fail any shopper request. Every scan MUST be delivered eventually and counted exactly once in effect, including scans made while Analytics was down.
+- **FR-016**: Analytics' reading of scans MUST NOT block or fail any shopper request. Every scan MUST be counted exactly once in effect, including scans made while Analytics was down, and Analytics MUST be able to rebuild its current window from Checkout's scans alone after a restart.
 - **FR-017**: Each coordinated operation MUST have bounded time limits per step, so a slow dependency produces a failure or compensation rather than a hang.
 - **FR-018**: The chosen coordination style (orchestration or choreography), the order of steps, and the compensation for each step MUST be documented, with the reason for the choice.
 
@@ -225,7 +230,7 @@ and the invariant passes.
 
 - **FR-022**: An automated boundary check MUST fail on cross-service data-access imports, connections to a data store a service does not own, and compose configuration giving one service another's store credentials.
 - **FR-023**: Automated tests MUST cover each completion failure path in User Story 3, including failure injection at each step.
-- **FR-024**: A correctness check across all stores MUST verify the invariant (stock sold equals units scanned in completed transactions, no negative stock, no transaction stuck mid-completion, Analytics scan count equals Checkout's) on a quiescent system.
+- **FR-024**: A correctness check across all stores MUST verify the invariant (stock sold equals units scanned in completed transactions, no negative stock, no transaction stuck mid-completion, Analytics has read every scan Checkout holds) on a quiescent system.
 - **FR-025**: Two load-client JSON reports MUST be produced and committed: default parameters, and stress mode (`--stations=100 --duration=120`), in a subfolder named for spec 007.
 - **FR-026**: The README MUST list the microservices, their data stores, the coordination flow (with a diagram), and how to run and test, and MUST state how results compare with spec 005 and why.
 
@@ -238,8 +243,8 @@ and the invariant passes.
 - **Stock Level** (owned by Inventory): units on hand per SKU. Never negative.
 - **Stock Reservation / Adjustment** (owned by Inventory): the record that a particular transaction's units were taken, keyed so a retry is recognized and a compensation can reverse it.
 - **Low-Stock Alert** (owned by Inventory): raised when stock falls to or below a threshold after a sale.
-- **Scan Record** (owned by Analytics): its own copy of each scan (sequence number and SKU) needed to compute popularity, received from Checkout.
-- **Popular-Items Snapshot** (owned by Analytics): the latest top-selling items over the sliding window.
+- **Rolling Scan Window** (held in Analytics' memory, derived): the sequence numbers and SKUs of the most recent scans needed to compute popularity, read from Checkout. Never persisted.
+- **Popular-Items Ranking** (held in Analytics' memory, derived): the latest top-selling items over the sliding window.
 
 ## Success Criteria *(mandatory)*
 
@@ -261,10 +266,10 @@ and the invariant passes.
 - **Granularity stays at four microservices**: the services from spec 005 are kept. The change is in data ownership and coordination, not in the decomposition.
 - **Stock moves to Inventory**: in spec 005, Checkout wrote stock in its own database transaction. Under database-per-service, Inventory owns stock and its updates, and that is what makes completion a multi-store operation.
 - **Prices are captured at scan time**: Checkout takes the price from a cached snapshot of Catalog's public item list and stores it with the scan. Completion therefore never needs Catalog, and receipts stay stable. The catalog is fixed during a run.
-- **Coordination style** (decided in the plan, FR-018): completion is **orchestrated** by Checkout, because the flow has one owner and a fixed order. The scan feed to Analytics is **choreographed**, as events delivered by a relay with an idempotent receiver.
+- **Coordination style** (decided in the plan, FR-018): completion is **orchestrated** by Checkout, because the flow has one owner and a fixed order. The scan feed to Analytics is a **pull**: Analytics reads Checkout's scan log by sequence number, so there is no coordination to orchestrate and nothing to compensate.
 - **Eventual consistency is acceptable for Analytics and low-stock reporting**, but not for stock levels or the receipt.
 - **Payment is simulated and always succeeds**, as in the contract, so there is no payment step to compensate.
-- **Container-per-service, one host**: "independently deployable" is met by separate images and separate compose entries, each microservice with its own private store (a database container for Checkout, Inventory and Analytics, a read-only file volume for Catalog). Results are not directly comparable to native runs from weeks 1–4, and the README says so.
+- **Container-per-service, one host**: "independently deployable" is met by separate images and separate compose entries, each microservice with its own private store (a database container for Checkout and Inventory, a read-only file volume for Catalog, and in-memory derived state for Analytics). Results are not directly comparable to native runs from weeks 1–4, and the README says so.
 - **Docker Desktop is installed** and sized for the stress run. The plan sets recommended CPU and memory.
 - **Service-to-service communication uses the microservices' own network interfaces** (synchronous calls and/or a messaging mechanism, to be chosen in planning). Using one is no longer forbidden, unlike spec 005.
 - **Reports location**: committed under the load client's reports directory in a subfolder for spec 007.

@@ -7,7 +7,7 @@
 ## Summary
 
 Spec 005's four domain services stop sharing one PostgreSQL database and the `checkout_data`
-library. Checkout, Inventory and Analytics each get **their own PostgreSQL instance on its own private network**, and Catalog keeps its fixed list in **a read-only file only it can open**. Each service has its own data-access code. The frozen contract, the nginx gateway's public routes and the unmodified load
+library. Checkout and Inventory each get **their own PostgreSQL instance on its own private network**, Catalog keeps its fixed list in **a read-only file only it can open**, and Analytics keeps **no persistent store at all**: its window is derived state held in memory and rebuilt from Checkout's scans. Each service has its own data-access code. The frozen contract, the nginx gateway's public routes and the unmodified load
 client do not change.
 
 Three things were free under a shared database and now need design:
@@ -17,10 +17,10 @@ Three things were free under a shared database and now need design:
    transaction) → mark `COMPLETED`, with a `release` compensation, a durable `completion`
    record, and a recovery loop. See [research R1–R4](./research.md) and
    [contracts/completion-saga.md](./contracts/completion-saga.md).
-2. **Feeding Analytics** is **choreography**: Checkout publishes each scan through a
-   cursor-based relay over its own scan table to Analytics' idempotent ingest endpoint. Analytics
-   was already driven by scans, not sales, so the contract tests require this. See
-   [research R5](./research.md).
+2. **Feeding Analytics** is a **pull**: Analytics polls Checkout's `GET /internal/scans` for new
+   scans and keeps its sliding window in memory, so it needs no database, no relay and no leader
+   election. Analytics was already driven by scans, not sales, so the contract tests require this.
+   See [research R5](./research.md).
 3. **Needing another service's reference data** (prices, item names) uses Catalog's *public*
    `GET /items`, cached in memory as a snapshot. See [research R6](./research.md).
 
@@ -33,9 +33,9 @@ retries and a propagated request id. No broker is introduced ([research R7](./re
 
 **Primary Dependencies**: FastAPI + uvicorn (uvloop, httptools), SQLAlchemy 2 async + asyncpg, orjson (all unchanged); **httpx** added to every service image for service-to-service calls; nginx for the gateway (unchanged)
 
-**Storage**: PostgreSQL 17, **three instances**: `checkout-db`, `inventory-db`, `analytics-db` (one schema, one role, one private network each); Catalog: a read-only `catalog.csv` on a volume mounted only into Catalog and its seed job
+**Storage**: PostgreSQL 17, **two instances**: `checkout-db`, `inventory-db` (one schema, one role, one private network each); Catalog: a read-only `catalog.csv` on a volume mounted only into Catalog and its seed job; Analytics: none (in-memory derived state)
 
-**Testing**: pytest + pytest-asyncio against native PostgreSQL (three `*_test` databases plus a temporary catalog file); in-process service apps joined by a fault-injecting ASGI transport; compose-level failure drills; the graded load client
+**Testing**: pytest + pytest-asyncio against native PostgreSQL (two `*_test` databases plus a temporary catalog file); in-process service apps joined by a fault-injecting ASGI transport; compose-level failure drills; the graded load client
 
 **Target Platform**: Docker Compose on Docker Desktop (macOS), as in 005
 
@@ -45,7 +45,7 @@ retries and a propagated request id. No broker is introduced ([research R7](./re
 
 **Constraints**: contract unchanged; stock never negative; no cross-database transactions; no service ever connects to another's database; every cross-service call has a deadline
 
-**Scale/Scope**: 4 services, 3 databases and 1 file store, 1 cross-service write flow (completion), 1 async feed (scans), 2000-item catalog; load client up to 100 stations
+**Scale/Scope**: 4 services, 2 databases, 1 file store and 1 in-memory read model, 1 cross-service write flow (completion), 1 async pull (scans), 2000-item catalog; load client up to 100 stations
 
 ## Constitution Check
 
@@ -88,7 +88,7 @@ specs/007-microservices-architecture/
 
 ```text
 backend/
-├── compose.yaml                     # 3 DBs + catalog volume, 4 seeds, 4 services, gateway, tools; networks per topology contract
+├── compose.yaml                     # 2 DBs + catalog volume, 3 seeds, 4 services, gateway, tools; networks per topology contract
 ├── compose.test.yaml
 ├── gateway/                         # nginx.conf: + /internal/ blocked, + X-Request-ID
 ├── packages/
@@ -104,8 +104,8 @@ backend/
 │   │   ├── db.py  models.py  repo.py  seed.py
 │   │   ├── saga.py                  # completion orchestrator + compensation
 │   │   ├── recovery.py              # resumes/compensates stuck completions
-│   │   ├── scan_relay.py            # cursor-based scan feed to Analytics
-│   │   ├── catalog_client.py  inventory_client.py  analytics_client.py
+│   │   ├── internal_api.py          # GET /internal/scans (read by Analytics) and /internal/reports/*
+│   │   ├── catalog_client.py  inventory_client.py
 │   │   └── sweeper.py
 │   ├── inventory/src/inventory_service/
 │   │   ├── main.py  api.py  low_stock.py
@@ -113,10 +113,11 @@ backend/
 │   │   ├── db.py  models.py  repo.py  seed.py
 │   │   └── catalog_client.py
 │   └── analytics/src/analytics_service/
-│       ├── main.py  api.py  popular_items.py  supervisor.py  pipeline.py   # pipeline reused from 005
-│       ├── ingest.py                # POST /internal/scans, idempotent
-│       ├── db.py  models.py  repo.py  seed.py
-│       └── catalog_client.py
+│       ├── main.py  api.py  popular_items.py  supervisor.py  pipeline.py   # pipeline reused from 005, no advisory lock
+│       ├── config.py  scan_source.py   # HTTP ScanSource: reads Checkout's GET /internal/scans
+│       ├── scan_window.py           # in-memory rolling window of recent scans
+│       ├── internal_reports.py      # GET /internal/reports/cursor
+│       └── catalog_client.py        # no database, no SQLAlchemy, no seed
 ├── scripts/
 │   ├── check_boundaries.py          # rewritten rules
 │   ├── verify_invariant.py          # now calls internal report endpoints on all services
@@ -124,11 +125,11 @@ backend/
 │   └── lock_services.sh             # adds httpx to each service's lock
 └── tests/
     ├── contract/                    # assertions unchanged
-    ├── integration/                 # existing + saga, relay, recovery
+    ├── integration/                 # existing + saga, recovery, Analytics pull and rebuild
     ├── failure/                     # fault-injection per saga step (FR-023)
     ├── unit/
     ├── _dispatch.py                 # gateway twin + inter-service ASGI mesh with fault hooks
-    └── conftest.py                  # three databases and a temp catalog file instead of one database
+    └── conftest.py                  # two databases and a temp catalog file instead of one database
 ```
 
 **Structure Decision**: Keep 005's layout (one directory per service, shared `checkout_web` for
@@ -138,9 +139,8 @@ image. This is the smallest change that satisfies FR-005 and FR-006.
 
 ## Complexity Tracking
 
-No constitution violations to justify. Two choices add moving parts, both required by the spec:
+No constitution violations to justify. One choice adds moving parts, required by the spec:
 
 | Addition | Why Needed | Simpler Alternative Rejected Because |
 | --- | --- | --- |
 | `completion` table and recovery loop in Checkout | FR-015: a crash mid-saga must not strand a transaction | Relying on the client to retry leaves stock reserved for abandoned shoppers |
-| Scan relay with persisted cursor | FR-016/009: Analytics must receive every scan exactly once in effect without blocking scans | A synchronous call per scan adds a hop to the hottest path and couples Checkout availability to Analytics |

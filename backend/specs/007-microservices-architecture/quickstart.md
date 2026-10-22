@@ -10,10 +10,10 @@ native PostgreSQL 17 for the host-side tests. Contracts: [contracts/](./contract
 uv run python scripts/check_boundaries.py
 ```
 
-Expect: exit 0, all ten rules in [service-boundaries.md](./contracts/service-boundaries.md) pass.
+Expect: exit 0, all eleven rules in [service-boundaries.md](./contracts/service-boundaries.md) pass.
 Covers FR-005, FR-007, FR-008, FR-022, SC-007.
 
-## V2. Contract and integration tests, in-process (three test databases and a temporary catalog file)
+## V2. Contract and integration tests, in-process (two test databases and a temporary catalog file)
 
 ```bash
 uv run pytest tests/contract tests/integration tests/unit
@@ -31,7 +31,7 @@ Expect: for each of rows A–H in [completion-saga.md](./contracts/completion-sa
 state matches the table and `verify_invariant` logic reports consistent stores (FR-023, SC-003,
 SC-004). Includes: reserve rejected, reserve timeout then success on retry, reserve timeout
 then compensation, finalize failure, duplicate and concurrent `complete`, late `reserve` after
-`release`, relay and ingest failures.
+`release`, and Analytics' scan reads failing.
 
 ## V4. Bring up the stack
 
@@ -41,7 +41,7 @@ docker compose up -d --build --wait
 docker compose ps
 ```
 
-Expect: three databases, four one-shot seeds `exited (0)`, four services and the gateway `healthy`. `docker compose exec catalog sh -c 'echo x > /data/catalog.csv'` must fail (read-only volume).
+Expect: two databases, three one-shot seeds `exited (0)`, four services and the gateway `healthy`. `docker compose exec catalog sh -c 'echo x > /data/catalog.csv'` must fail (read-only volume).
 Then confirm isolation:
 
 ```bash
@@ -49,7 +49,7 @@ docker compose exec checkout python -c "import socket; socket.create_connection(
 ```
 
 Expect: fails (name does not resolve). Repeat for each service-to-foreign-database pair
-(FR-008). Catalog has no database to reach.
+(FR-008). Catalog and Analytics have no database to reach.
 
 ## V5. Contract tests over real HTTP
 
@@ -104,6 +104,11 @@ curl -s localhost:8080/analytics/popular-items | head
 ```
 
 Expect: ranking reflects all scans made while it was down (SC-006).
+
+Then the derived-state edge case: stop `checkout`, restart `analytics`, and confirm
+`/analytics/popular-items` answers `200` with the empty window (no error). Start `checkout` again
+and confirm the ranking returns within seconds. Finally stop `checkout` alone and confirm Analytics
+keeps serving its last ranking.
 
 ## V10. Graded load reports
 

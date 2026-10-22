@@ -11,7 +11,7 @@ Allowed callers (enforced by [service-boundaries.md](./service-boundaries.md)):
 | --- | --- | --- |
 | Checkout, Inventory, Analytics | Catalog | `GET /items` (the public route, reused) |
 | Checkout | Inventory | `POST /internal/reservations`, `DELETE /internal/reservations/{transactionId}` |
-| Checkout | Analytics | `POST /internal/scans` |
+| Analytics | Checkout | `GET /internal/scans` |
 | verification tool | Checkout, Inventory, Analytics | `GET /internal/reports/*` |
 
 ## Inventory: reserve stock
@@ -40,26 +40,29 @@ Allowed callers (enforced by [service-boundaries.md](./service-boundaries.md)):
 | `200` | `{ "transactionId": "tx-123", "state": "RELEASED", "unitsRestored": 3 }` | Applied adjustment reversed, or tombstone recorded when there was none (`unitsRestored: 0`) |
 | `200` | same, `"alreadyReleased": true` | Idempotent repeat |
 
-## Analytics: ingest scans
+## Checkout: read scans (called by Analytics)
 
-`POST /internal/scans`  (deadline 2 s; batch of up to 1000)
+`GET /internal/scans?after=<scanId>&limit=<n>`  (deadline 2 s; `limit` 0–1000, default 1000)
 
-```json
-{ "scans": [ { "scanId": 4511, "sku": "SKU-000002" }, { "scanId": 4512, "sku": "SKU-000007" } ] }
-```
+A primary-key range read over Checkout's scan table, `id > after ORDER BY id LIMIT n`. Only
+committed rows are visible, so a scan id whose transaction has not committed yet is simply absent
+and appears on a later call (Analytics' watermark logic copes with the hole).
 
 | Status | Body | Meaning |
 | --- | --- | --- |
-| `200` | `{ "accepted": 2, "duplicates": 0 }` | Inserted with `ON CONFLICT DO NOTHING`. Replays are safe |
+| `200` | `{ "scans": [ { "scanId": 4511, "sku": "SKU-000002" }, { "scanId": 4512, "sku": "SKU-000007" } ], "maxScanId": 4512 }` | Scans after `after`, in id order. `maxScanId` is the highest committed scan id in the whole table (0 when empty), independent of `limit`. `limit=0` returns no scans and is the cheap way to read `maxScanId` |
+| `400` | `ApiError` `INVALID_REQUEST` | `after` or `limit` is missing, not an integer, or out of range |
 
-Out-of-order and overlapping batches are allowed. The pipeline's own watermark logic handles gaps.
+Reads are idempotent and side-effect free: Checkout keeps no per-caller state, so Analytics can
+restart, re-read or re-bootstrap at any time. Overlapping reads are allowed.
 
 ## Read-only reports (verification tool)
 
 | Route | Service | Response |
 | --- | --- | --- |
 | `GET /internal/reports/sold-by-sku` | Checkout | `{ "sold": { "SKU-000001": 120, ... }, "completing": 0, "openCompletions": 0, "completedTransactions": [..] }`: units on `COMPLETED` transactions per SKU, count of `COMPLETING` transactions, count of non-terminal `completion` rows, ids of completed transactions |
-| `GET /internal/reports/scan-count` | Checkout, Analytics | `{ "scans": 98211, "maxScanId": 98211 }` |
+| `GET /internal/reports/scan-count` | Checkout | `{ "scans": 98211, "maxScanId": 98211 }` |
+| `GET /internal/reports/cursor` | Analytics | `{ "lastScanId": 98211, "windowEnd": 98000 }`: the tail's watermark and the latest published window end |
 | `GET /internal/reports/stock` | Inventory | `{ "stock": [ { "sku": "...", "initial": 10000, "current": 9880 } ], "adjustments": { "applied": [..tx ids..], "released": [..tx ids..] } }` |
 
 ## Client behavior (`checkout_web.client`)
@@ -67,8 +70,8 @@ Out-of-order and overlapping batches are allowed. The pipeline's own watermark l
 | Setting | Value |
 | --- | --- |
 | Connect timeout | 0.5 s |
-| Read timeout | 2 s (reserve/release/ingest), 5 s (catalog fetch) |
-| Retries | Idempotent calls only: reserve, release, ingest, catalog GET. Total reserve budget 4 s |
+| Read timeout | 2 s (reserve, release, scan reads), 5 s (catalog fetch) |
+| Retries | Idempotent calls only: reserve, release, scan reads, catalog GET. Total reserve budget 4 s |
 | Keep-alive | One pooled client per target |
 | Propagation | Forward `X-Request-ID`; generate one for background work |
-| Failure mapping | Exhausted retries raise `UpstreamUnavailable`, mapped to the contract's `503 INTERNAL_ERROR` |
+| Failure mapping | Exhausted retries raise `UpstreamUnavailable`. On a request path it maps to the contract's `503 INTERNAL_ERROR`. In Analytics' background tail it is logged and retried after a 1 s backoff |

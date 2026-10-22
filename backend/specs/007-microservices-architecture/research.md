@@ -77,26 +77,56 @@ lost message.
 
 **Alternatives**: Delayed message queue (needs a broker); relying on client retry (strands stock).
 
-## R5. Analytics feed: cursor relay (choreography), at-least-once with idempotent receiver
+## R5. Analytics feed: in-memory pipeline that pulls scans from Checkout
 
 **Decision**: Popular-items has always counted **scans**, including scans in transactions that
 are never completed, and the existing contract tests assert that. So the feed is scan-driven, not
-completion-driven. Checkout's `scan_relay.py` tails Checkout's own `transaction_item` table (no
-extra write on the scan hot path), batches rows, and POSTs them to Analytics'
-`POST /internal/scans`. Analytics inserts into its `scan_event` table with the scan id as primary
-key and `ON CONFLICT DO NOTHING`. The relay's position is stored in Checkout's `relay_cursor`
-table. The contiguous-watermark and gap-grace logic from 005's `TailIngest` moves into the relay,
-because the same out-of-order-commit problem now exists on the sending side. Analytics keeps its
-existing persistent pipeline unchanged, tailing its own `scan_event` table. A single relay runs
-per cluster, guarded by an advisory lock in Checkout's database.
+completion-driven. Analytics has **no database and no persistent store**. It is a derived read
+model of Checkout's scan log, which is already durable in Checkout's `transaction_item` table.
 
-**Rationale**: No hot-path cost, no coupling of scan availability to Analytics, exactly-once
-effect through the primary key, and catch-up after downtime for free because the cursor does not
-advance on failure (SC-006).
+- **Source.** Checkout exposes `GET /internal/scans?after=<scanId>&limit=<n>`, a primary-key range
+  read over its own scan table returning `{scans: [{scanId, sku}], maxScanId}` in id order (only
+  committed rows are visible). Checkout runs no relay, keeps no cursor and does not know Analytics
+  exists.
+- **Pipeline.** Analytics keeps 005's five-filter persistent pipeline (tail → window → aggregation →
+  ranking → output). `TailIngest` keeps its contiguous-watermark and gap-grace logic, because
+  concurrent checkouts still commit scan ids out of order. Only its source changes, from a SQL
+  query to a call through `checkout_web.client` (a `ScanSource` seam keeps tests simple).
+  `OutputFilter` publishes into an in-memory slot instead of upserting a snapshot row.
+- **State.** The 1000-scan window, per-SKU counts and the latest top-200 ranking live in memory. A
+  small rolling buffer of the last ≤ 1000 scans (`ScanWindow`) answers the "fewer scans than a
+  window" read path that 005 answered with SQL (`windowStart` stays 0 until a full window exists).
+- **Bootstrap and restart.** On start (and after any filter error) Analytics reads `maxScanId`, sets
+  `b0 = maxScanId − maxScanId % 500`, and tails from `b0 − 1000`, exactly as 005's supervisor did
+  from the database. Catch-up after downtime therefore costs about 1000 rows, not the number of
+  scans missed. If `maxScanId` is ever lower than Analytics' cursor (Checkout's data was reset),
+  it re-bootstraps.
+- **No leader election.** 005's advisory lock existed so that replicas would not run duplicate
+  pipelines writing one shared snapshot row. With in-memory state there is no shared write target:
+  a second instance would compute the same window from the same source, which is redundant but
+  never wrong. Deployment runs one instance (`WORKERS=1`, one container), so the supervisor loses its
+  `_acquire` standby loop and dedicated connection.
+- **Failure behaviour.** Checkout down: the tail retries with a 1 s backoff and Analytics keeps
+  serving its last ranking from memory. Analytics restarted while Checkout is down: it cannot
+  rebuild, so it serves the empty window until Checkout returns. This is accepted because the data
+  is derived (spec edge cases). Analytics down: nothing else is affected, since nobody calls it
+  during scans or completion.
 
-**Alternatives**: Synchronous call per scan (extra hop on the most frequent request, makes
-Analytics outages break scans). Separate outbox table (extra insert in the scan statement for
-the same information `transaction_item` already holds). Broker (see R7).
+**Rationale**: The only durable copy of a scan needs to exist once, in Checkout. A second copy in
+an Analytics database held ~1.1 M rows after one stress run, was never pruned, and the pipeline only
+ever needs the last 1000. Pulling flips the dependency to the natural direction (the read model
+depends on the source), removes Checkout's relay, cursor table, advisory lock, Analytics client and
+Analytics' ingest endpoint, and makes catch-up for free because the cursor lives with the reader.
+The scan hot path is untouched (no extra write, no extra call). The cost is one indexed range query on
+Checkout per poll (every 100 ms), the same query Analytics ran against the shared database in 005.
+
+**Alternatives**: *Checkout pushes scans through a cursor relay into an Analytics database* (the
+earlier plan; keeps a duplicate unbounded table, a relay, a cursor table and an ingest endpoint).
+*Synchronous call per scan* (extra hop on the most frequent request, makes Analytics outages
+break scans). *Analytics database with only the advisory lock removed* (keeps the duplicate
+table). *Snapshot file for the last ranking* (would keep serving the old ranking through an
+Analytics restart with Checkout down; deferred, add only if that edge case matters). *Broker*
+(see R7).
 
 ## R6. Reference data: Catalog snapshot cache over the public API
 
@@ -125,11 +155,11 @@ transport, matches the existing nginx/uvicorn stack, and the request/response sh
 shopper needs for completion is synchronous anyway.
 
 **Alternatives**: RabbitMQ/Kafka/NATS (operational weight and new failure modes for one async
-feed that a cursor relay handles); gRPC (new toolchain, no benefit at this scale).
+feed that a pull handles); gRPC (new toolchain, no benefit at this scale).
 
-## R8. Private store per service: three databases and one file
+## R8. Private store per service: two databases, one file, one derived in-memory state
 
-**Decision**: Checkout, Inventory and Analytics each get a `postgres:17` container with its own
+**Decision**: Checkout and Inventory each get a `postgres:17` container with its own
 role/password, on a network shared only with its owning service and that service's seed job.
 Catalog has **no database**: its data is a fixed list written once by `seed-catalog` to
 `catalog.csv` (header `sku,name,price_cents`) on a named volume. The volume is mounted read-write
@@ -137,12 +167,14 @@ into `seed-catalog` and **read-only** into `catalog`, and into nothing else. Cat
 into memory at startup and serves `GET /items` from it. Services also join a `mesh`
 network (service ↔ service) and `edge` (gateway ↔ service). No service is attached to another
 service's database network. Tuning: `synchronous_commit=off`, `wal_compression=on` kept;
-`shared_buffers` sized per workload (checkout 512 MB, analytics 256 MB, inventory 128 MB), `max_connections` per service pool.
+`shared_buffers` sized per workload (checkout 512 MB, inventory 128 MB), `max_connections` per service pool.
+Analytics has **no store** ([R5](#r5-analytics-feed-in-memory-pipeline-that-pulls-scans-from-checkout)).
 
 **Rationale**: FR-007/FR-008 require "unreachable by network position, credentials or file access".
 Separate instances mean a compromised or buggy service cannot read another's data, and a
 database restart affects one service only.
 
+Analytics needs no store because everything it holds can be recomputed from Checkout's scans.
 A file is enough for Catalog because its data is read-only after seeding, has one reader and about 2000 rows. A
 database there would add a container, a connection pool and a startup dependency for no benefit.
 
@@ -153,10 +185,10 @@ reject it); separate schemas in one database (convention only); a Postgres insta
 ## R9. Seeding and schema creation per service
 
 **Decision**: Each service owns `seed.py` run by a one-shot compose job against its own database
-(`seed-catalog`, `seed-checkout`, `seed-inventory`, `seed-analytics`) using that service's role (Catalog's job has the volume instead).
+(`seed-catalog`, `seed-checkout`, `seed-inventory`) using that service's role (Catalog's job has the volume instead). Analytics has no seed job.
 Catalog writes `catalog.csv` (atomically: temp file, then rename); Inventory seeds stock for the same deterministic SKU list
 (`SKU-%06d`, count from `CATALOG_SIZE`, quantity from `STOCK_PER_ITEM`, price/name formulas stay
-in Catalog); Checkout and Analytics create empty schemas. Catalog's `--if-empty` means "file absent or empty". `--if-empty` semantics from 005 are
+in Catalog); Checkout creates an empty schema. Catalog's `--if-empty` means "file absent or empty". `--if-empty` semantics from 005 are
 kept. No cross-database foreign keys exist.
 
 **Rationale**: FR-010. The SKU naming formula is a shared *convention*, not shared data
@@ -169,15 +201,15 @@ Inventory fetches the SKU list from Catalog at seed time (adds a startup depende
 
 **Decision**: `scripts/verify_invariant.py` calls read-only internal reports:
 Checkout `GET /internal/reports/sold-by-sku`, Inventory `GET /internal/reports/stock`,
-Analytics `GET /internal/reports/scan-count`, plus Checkout `GET /internal/reports/scan-count`.
+Analytics `GET /internal/reports/cursor`, plus Checkout `GET /internal/reports/scan-count`.
 It checks per SKU `initial − current == sold`, no negative stock, no transaction left
-`COMPLETING`, no non-terminal `completion` rows, and (after waiting for the relay to drain)
-Analytics scan count equals Checkout's.
+`COMPLETING`, no non-terminal `completion` rows, and (after waiting for Analytics to catch up)
+Analytics' `lastScanId` equals Checkout's `maxScanId`.
 
 **Rationale**: Keeps FR-008 literal: the checker is not a back door into any database. Also tests
 that each service can describe its own data.
 
-**Alternatives**: A tool holding credentials for all three databases (convenient, but breaks the
+**Alternatives**: A tool holding credentials for both databases (convenient, but breaks the
 boundary it is checking).
 
 ## R11. Gateway: stays nginx, adds request id and hides internal routes
@@ -197,7 +229,7 @@ without application code.
 **Decision**: Every service logs one JSON line per saga step and per outbound call:
 `request_id`, `service`, `step`, `tx`, `outcome`, `elapsed_ms`. `request_id` comes from
 `X-Request-ID` (generated if absent, e.g. in direct-port tests). Background work (recovery,
-relay) logs its own generated id plus the transaction id.
+Analytics' tail) logs its own generated id plus the transaction id.
 
 **Rationale**: FR-020, SC-008. Failures are findable by grep across container logs.
 
@@ -207,10 +239,11 @@ problem needs.
 ## R13. Test strategy
 
 **Decision**: (a) Existing contract/integration tests keep their assertions. Fixtures change:
-three test databases, a temporary catalog file (`CATALOG_FILE`), each database service's engine bound to its own URL, and a mesh transport that
+two test databases (Checkout, Inventory), a temporary catalog file (`CATALOG_FILE`), each database service's engine bound to its own URL, and a mesh transport that
 routes inter-service calls to in-process apps. Tests that inserted directly into the old shared
-tables (for example `test_popular_items`'s direct scan inserts) now insert into the owning
-service's own database through that service's session fixture, which is a fixture change, not an
+tables (for example `test_popular_items`'s direct scan inserts) now insert into Checkout's
+scan table through the Checkout session fixture, and Analytics tests poll once through a
+`poll_analytics` hook instead of waiting for the 100 ms tail, which is a fixture change, not an
 assertion change. (b) New `tests/failure/`: the mesh transport can drop, delay or fail the Nth call
 to a target, covering each saga step and each recovery path. (c) Compose drills in the quickstart
 stop and restart real containers. (d) Load runs through the real gateway.
@@ -238,7 +271,7 @@ only if the 70 % target is missed and the cause is the hop).
 
 ## Spec Amendments Made During Planning
 
-Three findings from reading the 005 code and tests contradicted wording in the spec. All are now
+Four findings from reading the 005 code and tests contradicted wording in the spec. All are now
 corrected in `spec.md`:
 
 1. **Analytics is fed scans, not completed sales** (R5). The existing contract tests scan without
@@ -248,3 +281,7 @@ corrected in `spec.md`:
 3. **A retried `complete` on an already-completed transaction keeps the contract's `409`**
    (R3), rather than returning the same receipt. Retries *during* the saga converge on one
    outcome, and stock is reduced once either way.
+4. **Analytics needs no database** (R5). Its state is derived from Checkout's scans, so it
+   keeps a rolling window in memory and pulls scans from Checkout. This removes the Analytics
+   database, the scan relay and cursor table, the ingest endpoint and the advisory lock, and
+   introduces the accepted edge case of an Analytics restart while Checkout is down.
