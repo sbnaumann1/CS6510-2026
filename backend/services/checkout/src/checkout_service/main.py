@@ -23,6 +23,13 @@ log = logging.getLogger("checkout")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Open one connection before traffic: SQLAlchemy runs a pool's first-connect hook under
+    # a threading lock, which deadlocks the event loop if several requests race to open the
+    # pool's first connections.
+    try:
+        await ping()
+    except Exception:
+        log.warning("database not reachable yet; will retry on first use")
     tasks = [
         asyncio.create_task(_sweep_loop(), name="sweeper"),
         asyncio.create_task(recovery.recovery_loop(), name="recovery"),

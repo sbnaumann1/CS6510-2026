@@ -1,15 +1,15 @@
 """Integration test: autocommit sessions for single-statement routes (spec 006, T019).
 
-Covers data-model.md §2: a write through AutocommitSessionLocal commits on its own
-(no BEGIN/COMMIT round trips), and connections go back to the shared pool with the
-default isolation level, so transactional sessions stay transactional.
+Covers data-model.md §2: a write through Checkout's AutocommitSessionLocal commits on its
+own (no BEGIN/COMMIT round trips), and connections go back to the pool with the default
+isolation level, so transactional sessions stay transactional.
 """
 
 from __future__ import annotations
 
 from sqlalchemy import text
 
-from checkout_data import AutocommitSessionLocal, SessionLocal, engine
+from checkout_service.db import AutocommitSessionLocal, SessionLocal, engine
 
 _INSERT = text("INSERT INTO transaction (station_id) VALUES (:s) RETURNING id")
 _COUNT = text("SELECT count(*) FROM transaction WHERE id = :id")

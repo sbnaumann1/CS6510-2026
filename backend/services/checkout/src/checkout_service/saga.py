@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from checkout_service import catalog_client, inventory_client, repo
+from checkout_service.config import settings
 from checkout_service.db import SessionLocal
 from checkout_web.errors import (
     EMPTY_BASKET,
@@ -110,15 +111,25 @@ async def complete(tx_id: int) -> dict[str, Any]:
                 await repo.mark_completing(session, tx_id, total_cents)
                 joined = False
             else:
-                # A retry (or a second concurrent call) joins the saga in flight.
-                completion = await repo.get_completion(session, tx_id)
+                completion = await repo.get_completion(
+                    session, tx_id, settings.recovery_lease_s
+                )
+                if completion is not None and completion.fresh:
+                    # A live driver is on it: a concurrent duplicate is refused exactly as
+                    # 005 refused the second of two overlapping completes (INV-3).
+                    raise ApiError(
+                        TRANSACTION_NOT_OPEN, f"Transaction {public} is already completing."
+                    )
                 if completion is None or completion.state == "COMPENSATING":
                     raise UpstreamUnavailable(
                         "checkout", "the completion is being rolled back; retry shortly"
                     )
+                # The driver is gone (its lease expired): this retry takes the saga over.
+                # Every step is idempotent, so taking over cannot double-apply anything.
+                await repo.set_completion_state(session, tx_id, completion.state)
                 total_cents = completion.total_cents
                 joined = True
-    log_step("begin", tx=public, outcome="joined" if joined else "ok",
+    log_step("begin", tx=public, outcome="took-over" if joined else "ok",
              elapsed_ms=(time.monotonic() - started) * 1000)
 
     # Step 2: reserve stock in Inventory.

@@ -135,11 +135,13 @@ from checkout_service import inventory_client  # noqa: E402
 from checkout_service import seed as checkout_seed  # noqa: E402
 from checkout_service.db import SessionLocal as CheckoutSessionLocal  # noqa: E402
 from checkout_service.db import engine as checkout_engine  # noqa: E402
+from checkout_service.db import ping as checkout_ping  # noqa: E402
 from inventory_service import catalog_client as inventory_catalog  # noqa: E402
 from inventory_service import seed as inventory_seed  # noqa: E402
 from inventory_service.config import settings as inventory_settings  # noqa: E402
 from inventory_service.db import SessionLocal as InventorySessionLocal  # noqa: E402
 from inventory_service.db import engine as inventory_engine  # noqa: E402
+from inventory_service.db import ping as inventory_ping  # noqa: E402
 from tests._dispatch import MeshTransport, build_apps, build_dispatch_app  # noqa: E402
 
 _INVENTORY_TABLES = re.compile(r"\b(inventory_stock|low_stock_alert|stock_adjustment)\b", re.I)
@@ -161,7 +163,15 @@ def _schema() -> None:
 @pytest_asyncio.fixture(autouse=True)
 async def _dispose_engines_per_loop():
     """pytest-asyncio gives each test a fresh event loop; pooled asyncpg connections are
-    bound to the loop that created them, so the pools must not survive across tests."""
+    bound to the loop that created them, so the pools must not survive across tests.
+
+    Each fresh pool is warmed with one connection first. SQLAlchemy runs a pool's
+    first-connect hook under a threading lock, and when several connections are opened
+    concurrently on a cold pool the waiters block the event loop thread (the services warm
+    their pools in their lifespans for the same reason)."""
+    if not GATEWAY_URL:
+        await checkout_ping()
+        await inventory_ping()
     yield
     await checkout_engine.dispose()
     await inventory_engine.dispose()
@@ -276,6 +286,14 @@ async def client(reset_db, mesh, analytics) -> AsyncClient:
             yield c
         return
     async with SyncingClient(app=build_dispatch_app(mesh.apps), base_url="http://test") as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def checkout_client(reset_db, mesh) -> AsyncClient:
+    """The public API with no Analytics pipeline running, for tests that start, stop and
+    restart pipelines of their own."""
+    async with AsyncClient(app=build_dispatch_app(mesh.apps), base_url="http://test") as c:
         yield c
 
 

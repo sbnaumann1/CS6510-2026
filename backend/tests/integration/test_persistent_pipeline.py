@@ -1,7 +1,7 @@
-"""The persistent analytics pipeline against PostgreSQL (spec FR-012, FR-012a, FR-012b).
+"""The persistent analytics pipeline against Checkout's scan log (spec FR-012, FR-012a, FR-012b).
 
-Scans go in through the Checkout Service only; nothing calls Analytics. Every
-window the pipeline publishes must equal a direct SQL count over the same bounds,
+Scans go in through the Checkout Service only; nothing calls Analytics. Every window the
+pipeline publishes must equal a direct SQL count over the same bounds in Checkout's database,
 and the pipeline must never be re-created per slide.
 """
 
@@ -10,21 +10,32 @@ from __future__ import annotations
 import asyncio
 import random
 
+import pytest
+from sqlalchemy import text
+
+from analytics_service import state
 from analytics_service.supervisor import PipelineSupervisor
-from checkout_data import SessionLocal
-from checkout_data.repos import analytics as repo
+from checkout_service.db import SessionLocal
+
+_ORACLE = text(
+    "SELECT sku, count(*) AS scan_count FROM transaction_item"
+    " WHERE id > :s AND id <= :e GROUP BY sku ORDER BY count(*) DESC, sku LIMIT 200"
+)
+
+
+@pytest.fixture
+def client(checkout_client):
+    return checkout_client
 
 
 async def oracle(start: int, end: int) -> list[dict]:
     async with SessionLocal() as s:
-        rows = await repo.window_counts(s, start, end, 200)
+        rows = (await s.execute(_ORACLE, {"s": start, "e": end})).all()
     return [{"sku": r.sku, "scanCount": r.scan_count} for r in rows]
 
 
 async def snapshot_end() -> int:
-    async with SessionLocal() as s:
-        row = await repo.read_snapshot(s)
-    return row.window_end if row else 0
+    return state.latest.window_end if state.latest is not None else 0
 
 
 async def wait_for(pred, timeout=10.0):

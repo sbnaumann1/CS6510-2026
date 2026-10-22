@@ -10,7 +10,6 @@ import asyncio
 import logging
 import random
 from collections import Counter
-from contextlib import asynccontextmanager
 
 import pytest
 
@@ -133,31 +132,6 @@ async def test_ranking_breaks_ties_by_sku_and_truncates():
 # --- LatestSlot + OutputFilter ----------------------------------------------
 
 
-class FakeRepo:
-    def __init__(self):
-        self.writes: list[tuple[int, int]] = []
-
-    async def upsert_snapshot(self, session, window_size, slide_interval, start, end, ranking_json, computed_at=None):
-        session.events.append(("upsert", end))
-        self.writes.append((start, end))
-
-
-class FakeSession:
-    def __init__(self, events):
-        self.events = events
-
-    async def commit(self):
-        self.events.append(("commit",))
-
-
-def fake_session_factory(events):
-    @asynccontextmanager
-    async def factory():
-        yield FakeSession(events)
-
-    return factory
-
-
 def ranked(end: int) -> RankedData:
     return RankedData(WINDOW, SLIDE, max(0, end - WINDOW), end, None, [{"sku": "A", "scanCount": 1}])
 
@@ -171,32 +145,27 @@ async def test_latest_slot_keeps_only_the_newest_unconsumed_item():
     assert await slot.get() is TERMINATE
 
 
-async def test_output_writes_only_the_latest_of_a_burst():
-    events: list = []
-    repo = FakeRepo()
+async def test_output_publishes_only_the_latest_of_a_burst():
+    published: list = []
     slot = LatestSlot()
     for end in (500, 1000, 1500):
         await slot.put(ranked(end))
     await slot.put(TERMINATE)
 
-    await OutputFilter(fake_session_factory(events), repo=repo).run(slot)
+    await OutputFilter(on_publish=published.append).run(slot)
 
-    assert repo.writes == [(500, 1500)]
-    assert events == [("upsert", 1500), ("commit",)]
+    assert [(r.window_start, r.window_end) for r in published] == [(500, 1500)]
+    assert published[0].computed_at is not None, "stamped when published"
 
 
-async def test_output_commits_each_window_and_logs_it(caplog):
+async def test_output_publishes_each_window_and_logs_it(caplog):
     caplog.set_level(logging.INFO, logger="analytics")
-    events: list = []
     published: list = []
-    repo = FakeRepo()
     slot = LatestSlot()
-    task = asyncio.create_task(
-        OutputFilter(fake_session_factory(events), repo=repo, on_publish=published.append).run(slot)
-    )
+    task = asyncio.create_task(OutputFilter(on_publish=published.append).run(slot))
     for end in (500, 1000, 1500):
         await slot.put(ranked(end))
-        for _ in range(100):  # let the consumer write it before the next arrives
+        for _ in range(100):  # let the consumer publish it before the next arrives
             if len(published) == end // SLIDE:
                 break
             await asyncio.sleep(0.005)
@@ -204,21 +173,19 @@ async def test_output_commits_each_window_and_logs_it(caplog):
     await asyncio.wait_for(task, 2)
 
     assert [r.window_end for r in published] == [500, 1000, 1500]
-    assert events == [("upsert", 500), ("commit",), ("upsert", 1000), ("commit",), ("upsert", 1500), ("commit",)]
     assert "window published start=500 end=1500" in caplog.text
 
 
-async def test_output_never_writes_an_older_window():
-    events: list = []
-    repo = FakeRepo()
+async def test_output_never_publishes_an_older_window():
+    published: list = []
     slot = LatestSlot()
-    task = asyncio.create_task(OutputFilter(fake_session_factory(events), repo=repo).run(slot))
+    task = asyncio.create_task(OutputFilter(on_publish=published.append).run(slot))
     await slot.put(ranked(1000))
     await asyncio.sleep(0.05)
     await slot.put(ranked(500))
     await slot.put(TERMINATE)
     await asyncio.wait_for(task, 2)
-    assert repo.writes == [(0, 1000)]
+    assert [(r.window_start, r.window_end) for r in published] == [(0, 1000)]
 
 
 # --- shutdown ----------------------------------------------------------------

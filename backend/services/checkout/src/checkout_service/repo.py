@@ -78,8 +78,11 @@ _UPSERT_COMPLETION = text(
     "       attempts = 0, updated_at = now(), last_error = NULL"
 )
 
+# `fresh`: a live driver touched this completion within the lease, so it is in flight.
 _GET_COMPLETION = text(
-    "SELECT state, total_cents, attempts FROM completion WHERE transaction_id = :tx_id"
+    "SELECT state, total_cents, attempts,"
+    "       updated_at > now() - make_interval(secs => :lease) AS fresh"
+    "  FROM completion WHERE transaction_id = :tx_id"
 )
 
 _SET_COMPLETION_STATE = text(
@@ -193,8 +196,10 @@ async def mark_completing(session: AsyncSession, tx_id: int, total_cents: int) -
     await session.execute(_UPSERT_COMPLETION, {"tx_id": tx_id, "total": total_cents})
 
 
-async def get_completion(session: AsyncSession, tx_id: int) -> Row | None:
-    return (await session.execute(_GET_COMPLETION, {"tx_id": tx_id})).first()
+async def get_completion(session: AsyncSession, tx_id: int, lease_s: float) -> Row | None:
+    return (
+        await session.execute(_GET_COMPLETION, {"tx_id": tx_id, "lease": lease_s})
+    ).first()
 
 
 async def set_completion_state(

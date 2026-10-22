@@ -9,37 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
-from types import SimpleNamespace
 
-from analytics_service.pipeline import ScanData, TailIngest, Watermark
+import pytest
 
+from analytics_service.pipeline import CursorAhead, ScanData, TailIngest, Watermark
+from tests.unit._fakes import FakeScanSource
 
-class CommittedScans:
-    """Fake repo: get_scans_after over a mutable set of committed (id -> sku)."""
-
-    def __init__(self, ids=(), log=None):
-        self.rows: dict[int, str] = {i: f"SKU-{i:06d}" for i in ids}
-        self.log = log
-
-    def commit(self, *ids):
-        self.rows.update({i: f"SKU-{i:06d}" for i in ids})
-
-    async def get_scans_after(self, session, last_id, limit=1000):
-        got = [SimpleNamespace(id=i, sku=self.rows[i]) for i in sorted(self.rows) if i > last_id][:limit]
-        if self.log is not None:
-            self.log.append(("read", len(got)))
-        return got
+# The tests below were written against a repo fake; the scripted source is the same thing
+# with the HTTP seam in place of the SQL one.
+CommittedScans = FakeScanSource
 
 
-@asynccontextmanager
-async def no_session():
-    yield None
-
-
-def tail(repo, start_after=0, *, grace_s=10.0, sleep=None, **kw) -> TailIngest:
+def tail(source, start_after=0, *, grace_s=10.0, sleep=None, **kw) -> TailIngest:
     return TailIngest(
-        no_session, start_after, repo=repo, poll_s=0.002, grace_s=grace_s,
+        source, start_after, poll_s=0.002, grace_s=grace_s,
         **({"sleep": sleep} if sleep else {}), **kw,
     )
 
@@ -173,3 +156,33 @@ async def test_tail_stuck_behind_a_hole_sleeps_instead_of_spinning():
         assert len(sleeps) >= len(reads) - 1  # every no-progress read is followed by a sleep
     finally:
         task.cancel()
+
+
+async def test_unreachable_source_keeps_the_cursor_and_retries():
+    repo = CommittedScans([1, 2, 3])
+    repo.fail_next(3)
+    slept: list[float] = []
+
+    async def fast_sleep(seconds):
+        slept.append(seconds)
+        await asyncio.sleep(0)
+
+    out: asyncio.Queue = asyncio.Queue()
+    t = tail(repo, sleep=fast_sleep)
+    task = asyncio.create_task(t.run(out))
+    try:
+        assert scan_ids(await collect(out, 3)) == [1, 2, 3]
+        assert slept[:3] == [1.0, 1.0, 1.0], "backs off 1 s while Checkout is unreachable"
+    finally:
+        task.cancel()
+
+
+async def test_checkout_reset_below_the_cursor_raises_for_a_rebootstrap():
+    repo = CommittedScans(range(1, 11))
+    out: asyncio.Queue = asyncio.Queue()
+    t = tail(repo)
+    task = asyncio.create_task(t.run(out))
+    await collect(out, 10)
+    repo.rows.clear()  # Checkout's data was reset: its highest scan id is now 0
+    with pytest.raises(CursorAhead):
+        await asyncio.wait_for(task, 2)

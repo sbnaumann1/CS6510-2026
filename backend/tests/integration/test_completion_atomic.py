@@ -1,15 +1,15 @@
-"""Integration test: the completion critical section is all-or-nothing (spec 006, T012).
+"""Integration test: the stock critical section is all-or-nothing (spec 006, T012).
 
-Covers contracts/completion-statement.md: a short basket modifies nothing and names every
-short SKU, and `repos.checkout.complete_basket` returns (ok, completed_at, short) with
-alerts inserted in the same statement.
+Covers the reservation statement that moved from Checkout to Inventory (spec 007): a short
+basket modifies nothing and names every short SKU, and `reserve.reserve` decrements, alerts
+and records the adjustment in the same statement.
 """
 
 from __future__ import annotations
 
 from sqlalchemy import text
 
-from checkout_data.repos import checkout as repo
+from inventory_service import reserve
 
 _STOCK = text("SELECT sku, current_stock FROM inventory_stock WHERE sku = ANY(:skus) ORDER BY sku")
 _SET_STOCK = text("UPDATE inventory_stock SET current_stock = :n WHERE sku = :sku")
@@ -59,30 +59,20 @@ async def test_short_basket_modifies_nothing_and_lists_every_short_sku(client, s
     }
 
 
-async def _locked_open_tx(session) -> int:
-    tx_id = await session.scalar(
-        text("INSERT INTO transaction (station_id) VALUES ('station-01') RETURNING id")
-    )
-    assert (await repo.lock_transaction(session, tx_id)) is not None
-    return tx_id
+async def test_reserve_contract(reset_db, inventory_session):
+    s = inventory_session
+    await s.execute(_SET_STOCK, {"n": 50, "sku": "SKU-000020"})
+    await s.execute(_SET_STOCK, {"n": 50, "sku": "SKU-000021"})
+    await s.commit()
 
-
-async def test_complete_basket_contract(reset_db, session):
-    await session.execute(_SET_STOCK, {"n": 50, "sku": "SKU-000020"})
-    await session.execute(_SET_STOCK, {"n": 50, "sku": "SKU-000021"})
-    await session.commit()
-
-    async with session.begin():
-        tx_id = await _locked_open_tx(session)
-        row = await repo.complete_basket(
-            session, tx_id, ["SKU-000020", "SKU-000021"], [1, 1], 123, 50
+    async with s.begin():
+        result = await reserve.reserve(
+            s, 7, [("SKU-000020", 1), ("SKU-000021", 1)], threshold=50
         )
-        assert row.ok is True
-        assert row.short is None
-        assert row.completed_at is not None
+    assert result == reserve.Reserved(replayed=False)
 
     alerts = (
-        await session.execute(
+        await s.execute(
             text(
                 "SELECT sku, current_stock, threshold FROM low_stock_alert"
                 " WHERE sku IN ('SKU-000020', 'SKU-000021') ORDER BY sku"
@@ -90,33 +80,35 @@ async def test_complete_basket_contract(reset_db, session):
         )
     ).all()
     assert [tuple(a) for a in alerts] == [("SKU-000020", 49, 50), ("SKU-000021", 49, 50)]
-    tx = (
-        await session.execute(
-            text("SELECT status, total_amount_cents FROM transaction WHERE id = :id"),
-            {"id": tx_id},
-        )
+    adjustment = (
+        await s.execute(text("SELECT state, lines FROM stock_adjustment WHERE transaction_id = 7"))
     ).one()
-    assert str(getattr(tx.status, "value", tx.status)) == "COMPLETED"
-    assert tx.total_amount_cents == 123
-    await session.commit()
+    assert adjustment.state == "APPLIED"
+    assert sorted((l["sku"], l["qty"]) for l in adjustment.lines) == [
+        ("SKU-000020", 1),
+        ("SKU-000021", 1),
+    ]
+    await s.commit()
 
 
-async def test_complete_basket_short_returns_sorted_short_list(reset_db, session):
-    await session.execute(_SET_STOCK, {"n": 5, "sku": "SKU-000020"})
-    await session.execute(_SET_STOCK, {"n": 0, "sku": "SKU-000021"})
-    await session.commit()
+async def test_reserve_short_returns_sorted_short_list_and_modifies_nothing(
+    reset_db, inventory_session
+):
+    s = inventory_session
+    await s.execute(_SET_STOCK, {"n": 5, "sku": "SKU-000020"})
+    await s.execute(_SET_STOCK, {"n": 0, "sku": "SKU-000021"})
+    await s.commit()
 
-    await session.begin()
-    tx_id = await _locked_open_tx(session)
-    row = await repo.complete_basket(
-        session, tx_id, ["SKU-000020", "SKU-000021"], [2, 1], 456, 50
-    )
-    assert row.ok is False
-    assert row.completed_at is None
-    assert row.short == ["SKU-000021"]
-    await session.rollback()
+    async with s.begin():
+        result = await reserve.reserve(
+            s, 8, [("SKU-000021", 1), ("SKU-000020", 2)], threshold=50
+        )
+    assert result == reserve.Short(["SKU-000021"])
 
-    assert await _stock(session, ["SKU-000020", "SKU-000021"]) == {
+    assert await _stock(s, ["SKU-000020", "SKU-000021"]) == {
         "SKU-000020": 5,
         "SKU-000021": 0,
     }
+    n = await s.scalar(text("SELECT count(*) FROM stock_adjustment"))
+    await s.commit()
+    assert n == 0, "a refused reservation leaves no adjustment record"

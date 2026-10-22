@@ -6,7 +6,11 @@ fewer-than-N-items edge case.
 
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy import text
+
+from analytics_service import state
 
 
 async def _scan_many(client, distribution: dict[str, int]) -> None:
@@ -72,20 +76,29 @@ async def test_ties_are_broken_by_sku_for_determinism(client):
     assert [i["sku"] for i in items] == ["SKU-000007", "SKU-000008", "SKU-000009"]
 
 
-async def test_window_slides_past_older_scans(client, session, run_pipeline_until):
+async def _wait_published(end: int, timeout: float = 10.0) -> None:
+    async def loop():
+        while state.latest is None or state.latest.window_end < end:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(loop(), timeout)
+
+
+async def test_window_slides_past_older_scans(client, checkout_session, poll_analytics):
     """With a window of 1000, later scans push older ones out (US3 scenario 1).
 
-    Scans are inserted directly so the test stays fast; the persistent pipeline
-    picks them up by tailing the scan record, exactly as it does live. Windows
+    Scans are inserted straight into Checkout's scan table so the test stays fast; the
+    Analytics pipeline pulls them from Checkout's scan log exactly as it does live. Windows
     end on slide boundaries (005 research R5), so 1500 scans give (500, 1500].
     """
     from analytics_service import popular_items as analytics
 
     # 1500 line items: the first 600 are SKU-000001, the rest SKU-000002.
-    tx_id = await session.scalar(
+    s = checkout_session
+    tx_id = await s.scalar(
         text("INSERT INTO transaction (station_id) VALUES ('bulk') RETURNING id")
     )
-    await session.execute(
+    await s.execute(
         text(
             "INSERT INTO transaction_item (transaction_id, sku, unit_price_cents)"
             " SELECT :tx, CASE WHEN g <= 600 THEN 'SKU-000001' ELSE 'SKU-000002' END, 100"
@@ -93,10 +106,11 @@ async def test_window_slides_past_older_scans(client, session, run_pipeline_unti
         ),
         {"tx": tx_id},
     )
-    await session.commit()
+    await s.commit()
 
-    await run_pipeline_until(1500)
-    body = await analytics.read(session, limit=10)
+    await poll_analytics()
+    await _wait_published(1500)
+    body = await analytics.read(limit=10)
 
     # The window covers the most recent 1000 scans, so only 100 of the 600
     # SKU-000001 scans remain inside it.
@@ -106,24 +120,31 @@ async def test_window_slides_past_older_scans(client, session, run_pipeline_unti
     assert counts["SKU-000001"] == 100
 
 
-async def test_republish_is_idempotent(client, session, run_pipeline_until):
-    """A restarted pipeline republishes the same window for the same scans."""
-    from analytics_service import popular_items as analytics
+async def test_restarted_analytics_republishes_the_same_window(client, analytics, poll_analytics):
+    """An Analytics that lost its memory rebuilds the same window from Checkout's scans."""
+    from analytics_service import popular_items as analytics_read
 
     await _scan_many(client, {"SKU-000001": 500})
-    await run_pipeline_until(500)
-    first = await analytics.read(session, limit=10)
-    await run_pipeline_until(500)
-    second = await analytics.read(session, limit=10)
+    await poll_analytics()
+    await _wait_published(500)
+    first = await analytics_read.read(limit=10)
+
+    await analytics.restart()  # memory is lost; Checkout's scan log is not
+    await _wait_published(500)
+    second = await analytics_read.read(limit=10)
 
     assert first["items"] == second["items"]
     assert first["windowEnd"] == second["windowEnd"]
 
 
-async def test_snapshot_is_a_single_row(client, session, run_pipeline_until):
+async def test_only_the_latest_ranking_is_kept(client, analytics, poll_analytics):
+    """Each slide replaces the published ranking; nothing accumulates."""
     await _scan_many(client, {"SKU-000001": 500})
-    for _ in range(3):
-        await run_pipeline_until(500)
+    await poll_analytics()
+    await _wait_published(500)
+    assert (state.latest.window_start, state.latest.window_end) == (0, 500)
 
-    n = await session.scalar(text("SELECT count(*) FROM popular_window_snapshot"))
-    assert n == 1
+    await _scan_many(client, {"SKU-000002": 500})
+    await poll_analytics()
+    await _wait_published(1000)
+    assert (state.latest.window_start, state.latest.window_end) == (0, 1000)

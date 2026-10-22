@@ -23,9 +23,12 @@ def _nginx_routes() -> set[tuple[str, str, str]]:
     for exact, path, body in _LOCATION.findall(NGINX_CONF.read_text()):
         if path.startswith("@") or path == "/gateway/healthz":
             continue
+        kind = "exact" if exact else ("default" if path == "/" else "prefix")
+        if "return 404" in body:
+            routes.add((kind, path, "blocked"))  # /internal/ is never proxied
+            continue
         upstream = _PROXY.search(body)
         assert upstream, f"location {path} has no proxy_pass"
-        kind = "exact" if exact else ("default" if path == "/" else "prefix")
         routes.add((kind, path, upstream.group(1)))
     return routes
 
@@ -45,6 +48,20 @@ def test_every_contract_path_routes_to_its_owner():
     assert route("/transactions/tx-1") == "checkout"
     assert route("/inventory/low-stock") == "inventory"
     assert route("/analytics/popular-items") == "analytics"
+
+
+def test_internal_routes_are_blocked_not_sent_to_checkout():
+    """Without an explicit rule the default location would proxy /internal/... to checkout."""
+    assert route("/internal/scans") == "blocked"
+    assert route("/internal/reservations/tx-1") == "blocked"
+    assert route("/internal/reports/stock") == "blocked"
+
+
+def test_gateway_stamps_every_request_with_an_id():
+    conf = NGINX_CONF.read_text()
+    http_level = " ".join(conf[conf.index("http {") : conf.index("server {")].split())
+    assert http_level.count("proxy_set_header X-Request-ID $request_id_out;") == 1
+    assert "map $http_x_request_id $request_id_out" in http_level
 
 
 def test_unknown_paths_go_to_checkout():
