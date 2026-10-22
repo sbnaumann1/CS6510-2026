@@ -23,7 +23,8 @@ async def open_tx(client) -> str:
 
 async def test_empty_log_reports_max_scan_id_zero(checkout_client, mesh):
     body = (await read(mesh, after=0)).json()
-    assert body == {"scans": [], "maxScanId": 0}
+    assert body["scans"] == [] and body["maxScanId"] == 0
+    assert body["logId"], "the log is named, so a replaced log can be recognised"
 
 
 async def test_scans_come_back_in_order_after_the_cursor(checkout_client, mesh):
@@ -51,7 +52,8 @@ async def test_limit_is_honoured_and_max_scan_id_ignores_it(checkout_client, mes
 async def test_limit_zero_returns_only_the_max_scan_id(checkout_client, mesh):
     tx = await open_tx(checkout_client)
     await scan(checkout_client, tx, "SKU-000001", "SKU-000002")
-    assert (await read(mesh, after=0, limit=0)).json() == {"scans": [], "maxScanId": 2}
+    body = (await read(mesh, after=0, limit=0)).json()
+    assert body["scans"] == [] and body["maxScanId"] == 2
 
 
 async def test_invalid_parameters_are_400(checkout_client, mesh):
@@ -67,6 +69,17 @@ async def test_scans_in_a_transaction_that_is_never_completed_still_appear(check
     await scan(checkout_client, tx, "SKU-000004")
     body = (await read(mesh, after=0)).json()
     assert [s["sku"] for s in body["scans"]] == ["SKU-000004"]
+
+
+async def test_the_log_id_is_stable_until_the_log_is_replaced(checkout_client, mesh):
+    from checkout_service import seed
+
+    first = (await read(mesh, after=0)).json()["logId"]
+    tx = await open_tx(checkout_client)
+    await scan(checkout_client, tx, "SKU-000001")
+    assert (await read(mesh, after=0)).json()["logId"] == first, "new scans do not change it"
+    seed.main([])  # the run state is reset: a new log
+    assert (await read(mesh, after=0)).json()["logId"] != first
 
 
 async def test_the_public_gateway_does_not_expose_it(checkout_client):

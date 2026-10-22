@@ -47,5 +47,6 @@ async def scans(
         content={
             "scans": [{"scanId": r.id, "sku": r.sku} for r in rows],
             "maxScanId": max_id,
+            "logId": await repo.log_token(session),
         }
     )

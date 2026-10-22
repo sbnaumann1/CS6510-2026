@@ -1,53 +1,38 @@
-# Test-stack override (005 research R11): a `checkout_test` database with the
-# small catalog the test suite expects, reachable from the host at
-# 127.0.0.1:5433/checkout_test for the suite's reset fixture.
+# Test-stack override (007): the same topology with the small catalog the test suite
+# expects, under its own project name, image tags and volumes so it never touches the
+# measured stack's data. The two stacks cannot run at once (both bind :8080).
 #
 #   docker compose -f compose.yaml -f compose.test.yaml up -d --build --wait
 #   GATEWAY_URL=http://localhost:8080 \
-#   TEST_DATABASE_URL=postgresql+asyncpg://checkout:checkout@127.0.0.1:5433/checkout_test \
+#   CHECKOUT_TEST_DATABASE_URL=postgresql+asyncpg://checkout_user:checkout_pass@127.0.0.1:5442/checkout \
+#   INVENTORY_TEST_DATABASE_URL=postgresql+asyncpg://inventory_user:inventory_pass@127.0.0.1:5443/inventory \
 #     uv run pytest -q tests/contract
 #
-# Values are interpolated into compose.yaml through the same variables; the
-# defaults below apply only when this file is included.
-# A separate project name and separate image tags keep the test stack's
-# containers, volume and images apart from the measured stack's; sharing image
-# names made a test-stack build force the measured stack to be recreated.
-# The two stacks cannot run at once (both bind :8080).
+# The suite's session fixtures do not drop schemas in gateway mode; its reset helpers only
+# run in-process, so each gateway-mode run starts from a fresh `down -v`.
 name: checkout-test
 
 services:
-  postgres:
+  seed-catalog:
+    image: checkout-catalog:test
     environment:
-      POSTGRES_DB: checkout_test
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U checkout -d checkout_test"]
-  seed:
-    image: checkout-tools:test
+      CATALOG_SIZE: "50"
+  seed-checkout:
+    image: checkout-checkout:test
+  seed-inventory:
+    image: checkout-inventory:test
     environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
       CATALOG_SIZE: "50"
       STOCK_PER_ITEM: "100"
   catalog:
     image: checkout-catalog:test
-    environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
   checkout:
     image: checkout-checkout:test
-    environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
   inventory:
     image: checkout-inventory:test
-    environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
   analytics:
     image: checkout-analytics:test
-    environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
   gateway:
     image: checkout-gateway:test
   tools:
     image: checkout-tools:test
-    environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/checkout_test
-      CATALOG_SIZE: "50"
-      STOCK_PER_ITEM: "100"

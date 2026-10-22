@@ -128,6 +128,9 @@ class TailIngest:
         on_advance: Callable[[int], None] | None = None,
     ):
         self._source = source
+        # The log this tail started in: if the source later names a different one, Checkout's
+        # data was reset or replaced and the cursor means nothing.
+        self._log_id = getattr(source, "log_id", None)
         self._on_scan = on_scan
         self._on_advance = on_advance
         self._slide = slide
@@ -191,6 +194,8 @@ class TailIngest:
                 log.warning("scan source unavailable: %s", exc)
                 await self._sleep(UNAVAILABLE_BACKOFF_S)
                 continue
+            if getattr(self._source, "log_id", None) != self._log_id:
+                raise CursorAhead("checkout's scan log was replaced")
             if max_scan_id < self.last_id:
                 raise CursorAhead(
                     f"checkout's highest scan id {max_scan_id} is below the cursor {self.last_id}"

@@ -42,6 +42,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.reset and exists is not None:
             # Run state only; the schema stays.
             conn.execute(text("TRUNCATE completion, transaction_item, transaction RESTART IDENTITY CASCADE"))
+        # A new scan log: Analytics notices the change and rebuilds instead of trusting a
+        # cursor into the old one.
+        conn.execute(
+            text(
+                "INSERT INTO scan_log (id, token) VALUES (1, md5(random()::text || clock_timestamp()::text))"
+                " ON CONFLICT (id) DO UPDATE SET token = EXCLUDED.token"
+            )
+        )
     print("checkout schema ready")
     engine.dispose()
     return 0

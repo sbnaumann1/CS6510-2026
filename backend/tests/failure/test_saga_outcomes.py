@@ -150,6 +150,38 @@ async def test_e_an_undeliverable_release_is_finished_by_recovery(client, mesh):
     await assert_consistent()
 
 
+async def test_e_a_retry_finishes_an_undelivered_rollback_then_completes(client, mesh):
+    """Inventory was down, so the release could not be delivered. When it is back the
+    shopper's plain retry must work at once, not wait for the recovery loop."""
+    tx = await basket(client, {HOT: 2})
+    mesh.fail("inventory", "/internal/reservations", times=99, mode="timeout", method="POST")
+    mesh.fail("inventory", "/internal/reservations", times=99, mode="error", method="DELETE")
+    assert (await complete(client, tx)).status_code == 503
+    assert await completion_state(tx) == (1, "COMPENSATING")
+
+    mesh.clear_faults()  # Inventory is back
+    r = await complete(client, tx)
+
+    assert r.status_code == 200
+    assert await completion_state(tx) == (2, "COMPLETED"), "a fresh attempt, a new epoch"
+    assert await adjustment_states(tx) == [(1, "RELEASED"), (2, "APPLIED")]
+    assert await stock_of(HOT) == 98
+    await assert_consistent()
+
+
+async def test_e_a_retry_while_the_release_is_still_undeliverable_is_a_clean_503(client, mesh):
+    tx = await basket(client, {HOT: 2})
+    mesh.fail("inventory", "/internal/reservations", times=99, mode="error")
+    assert (await complete(client, tx)).status_code == 503
+    r = await complete(client, tx)  # Inventory still down
+    assert r.status_code == 503 and r.json()["error"] == "INTERNAL_ERROR"
+    assert await status_of(client, tx) == "OPEN"
+    mesh.clear_faults()
+    assert await recovery.run_once(lease_s=0.0) == 1
+    assert await stock_of(HOT) == 100
+    await assert_consistent()
+
+
 async def test_f_a_crash_after_the_reserve_but_before_the_record_is_rolled_back(client):
     tx = await basket(client, {HOT: 2})
     n = tx_number(tx)

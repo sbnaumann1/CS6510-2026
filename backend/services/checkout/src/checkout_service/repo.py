@@ -143,6 +143,7 @@ _SCANS_AFTER = text(
 )
 _MAX_SCAN_ID = text("SELECT coalesce(max(id), 0) FROM transaction_item")
 _SCAN_COUNT = text("SELECT count(*) FROM transaction_item")
+_LOG_TOKEN = text("SELECT token FROM scan_log WHERE id = 1")
 
 _SOLD_BY_SKU = text(
     "SELECT i.sku, count(*) AS sold FROM transaction_item i"
@@ -240,6 +241,10 @@ async def scans_after(session: AsyncSession, after: int, limit: int) -> Sequence
 
 async def max_scan_id(session: AsyncSession) -> int:
     return int(await session.scalar(_MAX_SCAN_ID) or 0)
+
+
+async def log_token(session: AsyncSession) -> str:
+    return await session.scalar(_LOG_TOKEN) or ""
 
 
 async def scan_count(session: AsyncSession) -> int:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Export one pinned requirements file per deployable image from the workspace
-# uv.lock (005 research R3). Each Dockerfile installs only its own file, so a
-# change in one service never invalidates another service's image layers.
+# Export one pinned requirements file per deployable image from the workspace uv.lock
+# (005 research R3). Each Dockerfile installs only its own file, so a change in one
+# service never invalidates another service's image layers.
 #
 #   ./scripts/lock_services.sh          # regenerate after any `uv lock`
 #
@@ -18,4 +18,3 @@ export_lock() {  # <package> <output>
 for svc in catalog checkout inventory analytics; do
   export_lock "${svc}-service" "services/${svc}/requirements.lock"
 done
-export_lock checkout-data packages/checkout_data/requirements.lock

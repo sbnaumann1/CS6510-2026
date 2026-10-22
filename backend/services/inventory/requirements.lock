@@ -3,12 +3,17 @@ annotated-types==0.8.0
 anyio==3.7.1
     # via
     #   fastapi
+    #   httpx
     #   starlette
     #   watchfiles
 async-timeout==5.0.1 ; python_full_version < '3.12'
     # via asyncpg
 asyncpg==0.29.0
-    # via checkout-data
+    # via inventory-service
+certifi==2026.7.22
+    # via
+    #   httpcore
+    #   httpx
 click==8.5.0
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
@@ -17,20 +22,30 @@ fastapi==0.104.1
     # via checkout-web
 greenlet==3.5.6
     # via
-    #   checkout-data
+    #   inventory-service
     #   sqlalchemy
 h11==0.16.0
-    # via uvicorn
+    # via
+    #   httpcore
+    #   uvicorn
+httpcore==1.0.9
+    # via httpx
 httptools==0.8.0
     # via uvicorn
+httpx==0.25.2
+    # via
+    #   checkout-web
+    #   inventory-service
 idna==3.19
-    # via anyio
+    # via
+    #   anyio
+    #   httpx
 orjson==3.9.10
     # via
     #   checkout-web
     #   inventory-service
 psycopg2-binary==2.9.9
-    # via checkout-data
+    # via inventory-service
 pydantic==2.5.0
     # via
     #   checkout-web
@@ -39,14 +54,16 @@ pydantic-core==2.14.1
     # via pydantic
 python-dotenv==1.0.0
     # via
-    #   checkout-data
+    #   inventory-service
     #   uvicorn
 pyyaml==6.0.3
     # via uvicorn
 sniffio==1.3.1
-    # via anyio
+    # via
+    #   anyio
+    #   httpx
 sqlalchemy==2.0.23
-    # via checkout-data
+    # via inventory-service
 starlette==0.27.0
     # via fastapi
 typing-extensions==4.16.0

@@ -79,9 +79,9 @@ class PipelineSupervisor:
                     log.warning("pipeline waiting for checkout: %s", exc)
                     await asyncio.sleep(self._backoff_s)
                 except CursorAhead as exc:
+                    # Not a failure: a new scan log is simply read from the start, at once.
                     log.warning("checkout data was reset; starting over: %s", exc)
                     state.reset()
-                    await asyncio.sleep(self._backoff_s)
                 except Exception:
                     log.exception("pipeline restarting after error")
                     await asyncio.sleep(self._backoff_s)

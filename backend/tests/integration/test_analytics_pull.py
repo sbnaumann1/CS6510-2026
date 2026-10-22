@@ -13,6 +13,7 @@ from sqlalchemy import text
 import analytics_service
 from analytics_service import state
 from analytics_service.supervisor import PipelineSupervisor
+from checkout_service import seed as checkout_seed
 from checkout_service.db import SessionLocal
 
 
@@ -93,16 +94,16 @@ async def test_checkout_data_reset_triggers_a_rebootstrap(checkout_client, mesh)
     task = asyncio.create_task(sup.run())
     try:
         await wait_until(lambda: state.cursor == 30)
-        # Checkout's database is reset while Analytics keeps running.
-        async with SessionLocal() as s:
-            await s.execute(text("TRUNCATE transaction_item, transaction RESTART IDENTITY CASCADE"))
-            await s.commit()
-        await wait_until(lambda: sup.instances >= 2, timeout=5)
-        assert state.cursor == 0 and len(state.window) == 0
+        # Checkout's scan log is replaced while Analytics keeps running.
+        checkout_seed.main([])
         tx = await open_tx(checkout_client)
-        await scan(checkout_client, tx, "SKU-000009")
-        await wait_until(lambda: state.cursor == 1)
-        assert state.window.counts(5) == [("SKU-000009", 1)]
+        # Thirty new scans reach the old cursor, so the position alone would not show the
+        # reset: only the log's identity does.
+        for _ in range(30):
+            await scan(checkout_client, tx, "SKU-000009")
+        await wait_until(lambda: sup.instances >= 2, timeout=5)
+        await wait_until(lambda: state.cursor == 30 and len(state.window) == 30)
+        assert state.window.counts(5) == [("SKU-000009", 30)], "no scan of the old log lingers"
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

@@ -96,8 +96,9 @@ def _resolve_dsn(service: str, debug_port: int) -> str:
     if explicit:
         return explicit
     if GATEWAY_URL:
+        # The compose test stack's published debug port and its default credentials.
         return (
-            f"postgresql+asyncpg://{service}:{service}@127.0.0.1:{debug_port}/{service}_test"
+            f"postgresql+asyncpg://{service}_user:{service}_pass@127.0.0.1:{debug_port}/{service}"
         )
     base = make_url(os.environ.get("DATABASE_URL", _DEFAULT_DSN))
     return base.set(database=f"checkout_{service}_test").render_as_string(hide_password=False)
@@ -106,8 +107,10 @@ def _resolve_dsn(service: str, debug_port: int) -> str:
 _CHECKOUT_DSN = _resolve_dsn("checkout", 5442)
 _INVENTORY_DSN = _resolve_dsn("inventory", 5443)
 
-# Safety net: never let a stray DATABASE_URL point the suite at real data.
-for _dsn in (_CHECKOUT_DSN, _INVENTORY_DSN):
+# Safety net: never let a stray DATABASE_URL point the suite at real data. (Gateway mode talks
+# to the disposable `checkout-test` compose project instead; its databases are not named
+# *_test, but it is a separate project with its own volumes.)
+for _dsn in () if GATEWAY_URL else (_CHECKOUT_DSN, _INVENTORY_DSN):
     if not (make_url(_dsn).database or "").endswith("_test"):
         raise RuntimeError(
             f"Refusing to run tests against {make_url(_dsn).database!r}: "
@@ -180,9 +183,12 @@ async def _dispose_engines_per_loop():
 @pytest_asyncio.fixture
 async def reset_db() -> None:
     """Reset every service's run state before a test that needs a clean slate."""
+    # In gateway mode these reach the compose test stack's databases on their published
+    # debug ports; the services notice (Analytics re-bootstraps when Checkout's scan ids
+    # restart from 1) and the catalog file is never touched.
+    checkout_seed.main([])
+    inventory_seed.main([])
     if not GATEWAY_URL:
-        checkout_seed.main([])
-        inventory_seed.main([])
         catalog_seed.main(["--reset"])
         analytics_state.reset()
 
@@ -258,10 +264,23 @@ async def _checkout_max_scan_id() -> int:
 
 async def _wait_for_analytics(timeout: float = 10.0) -> None:
     """Wait until Analytics has read every scan Checkout has committed."""
-    if GATEWAY_URL:
-        await asyncio.sleep(0.5)  # the real Analytics polls on its own
-        return
     target = await _checkout_max_scan_id()
+    if GATEWAY_URL:
+        # The real Analytics polls on its own: ask it (on its published debug port) how far
+        # it has read.
+        url = os.environ.get("ANALYTICS_DEBUG_URL", "http://127.0.0.1:8084") + "/internal/reports/cursor"
+        deadline = asyncio.get_running_loop().time() + timeout
+        async with AsyncClient(timeout=5) as probe:
+            while True:
+                try:
+                    cursor = (await probe.get(url)).json()["lastScanId"]
+                except Exception:
+                    cursor = -1
+                if cursor == target:
+                    return
+                if asyncio.get_running_loop().time() > deadline:
+                    raise TimeoutError(f"analytics at {cursor}, checkout at {target}")
+                await asyncio.sleep(0.05)
     deadline = asyncio.get_running_loop().time() + timeout
     while analytics_state.cursor < target:
         if asyncio.get_running_loop().time() > deadline:

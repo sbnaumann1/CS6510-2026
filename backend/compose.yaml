@@ -1,11 +1,16 @@
-# Spec 005: four domain services + gateway over one centralized PostgreSQL.
-# Topology contract: specs/005-service-architecture/contracts/compose-topology.md
+# Spec 007: four microservices behind a gateway, each with its own private store.
+# Topology contract: specs/007-microservices-architecture/contracts/compose-topology.md
 #
-#   docker compose up -d --build --wait     # build, seed an empty DB, start, block until healthy
-#   docker compose down -v                  # tear down, including database data
+#   docker compose up -d --build --wait     # build, seed, start, block until healthy
+#   docker compose down -v                  # tear down, including every store
 #
-# Domain services depend only on `seed` (never on each other), and are given only
-# DATABASE_URL plus tuning values — never another service's address (boundary rule 6).
+# Stores:  checkout-db and inventory-db are PostgreSQL instances, each on its own network
+#          with its own role. Catalog's store is a read-only file on a volume. Analytics has
+#          no store: it keeps derived state in memory and reads Checkout's scan log.
+# Networks: `edge` (gateway to services), `mesh` (service to service), and one private
+#          network per database. A database network has exactly one service on it.
+# Services depend on their own seed job only, never on each other: peers are contacted
+# lazily, so any one service can start while another is down.
 
 x-service-healthcheck: &service-healthcheck
   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
@@ -14,22 +19,25 @@ x-service-healthcheck: &service-healthcheck
   retries: 30
   start_period: 5s
 
+# Database tuning is carried over from 001 research R11, with shared_buffers and
+# max_connections sized per workload (007 research R8, compose-topology.md).
+
 services:
-  postgres:
+  # ---- Checkout's private store -------------------------------------------------
+  checkout-db:
     image: postgres:17
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-checkout}
-      POSTGRES_USER: checkout
-      POSTGRES_PASSWORD: checkout
-    # Tuning carried over from 001 research R11; shared_buffers sized for the VM (005 R8).
+      POSTGRES_DB: checkout
+      POSTGRES_USER: ${CHECKOUT_DB_USER:-checkout_user}
+      POSTGRES_PASSWORD: ${CHECKOUT_DB_PASSWORD:-checkout_pass}
     command:
       - postgres
       - -c
-      - shared_buffers=1GB
+      - shared_buffers=512MB
+      - -c
+      - max_connections=100
       - -c
       - work_mem=32MB
-      - -c
-      - max_connections=200
       - -c
       - synchronous_commit=off
       - -c
@@ -37,49 +45,117 @@ services:
       - -c
       - checkpoint_timeout=15min
       - -c
-      - max_wal_size=8GB
+      - max_wal_size=2GB
     shm_size: 256mb
     ports:
-      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:5442:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - checkout_pgdata:/var/lib/postgresql/data
     healthcheck:
       # TCP on purpose: during first-time init the server listens on its socket only.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U checkout -d ${POSTGRES_DB:-checkout}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${CHECKOUT_DB_USER:-checkout_user} -d checkout"]
       interval: 2s
       timeout: 3s
       retries: 30
+    networks: [checkout_data]
 
-  seed:
+  # ---- Inventory's private store ------------------------------------------------
+  inventory-db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: inventory
+      POSTGRES_USER: ${INVENTORY_DB_USER:-inventory_user}
+      POSTGRES_PASSWORD: ${INVENTORY_DB_PASSWORD:-inventory_pass}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=60
+      - -c
+      - work_mem=32MB
+      - -c
+      - synchronous_commit=off
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_wal_size=2GB
+    shm_size: 128mb
+    ports:
+      - "127.0.0.1:5443:5432"
+    volumes:
+      - inventory_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${INVENTORY_DB_USER:-inventory_user} -d inventory"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [inventory_data]
+
+  # ---- One-shot seeds: each writes only its own service's store -------------------
+  seed-catalog:
     build:
       context: .
-      dockerfile: packages/checkout_data/Dockerfile
-    image: checkout-tools
+      dockerfile: services/catalog/Dockerfile
+    image: checkout-catalog
+    command: ["python", "-m", "catalog_service.seed", "--if-empty"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      CATALOG_FILE: /data/catalog.csv
       CATALOG_SIZE: ${CATALOG_SIZE:-2000}
-      STOCK_PER_ITEM: ${STOCK_PER_ITEM:-10000}
-      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
-    depends_on:
-      postgres:
-        condition: service_healthy
+    volumes:
+      - catalog_data:/data
     restart: "no"
 
+  seed-checkout:
+    build:
+      context: .
+      dockerfile: services/checkout/Dockerfile
+    image: checkout-checkout
+    command: ["python", "-m", "checkout_service.seed", "--if-empty"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${CHECKOUT_DB_USER:-checkout_user}:${CHECKOUT_DB_PASSWORD:-checkout_pass}@checkout-db:5432/checkout
+    depends_on:
+      checkout-db:
+        condition: service_healthy
+    networks: [checkout_data]
+    restart: "no"
+
+  seed-inventory:
+    build:
+      context: .
+      dockerfile: services/inventory/Dockerfile
+    image: checkout-inventory
+    command: ["python", "-m", "inventory_service.seed", "--if-empty"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${INVENTORY_DB_USER:-inventory_user}:${INVENTORY_DB_PASSWORD:-inventory_pass}@inventory-db:5432/inventory
+      CATALOG_SIZE: ${CATALOG_SIZE:-2000}
+      STOCK_PER_ITEM: ${STOCK_PER_ITEM:-10000}
+    depends_on:
+      inventory-db:
+        condition: service_healthy
+    networks: [inventory_data]
+    restart: "no"
+
+  # ---- The microservices ----------------------------------------------------------
   catalog:
     build:
       context: .
       dockerfile: services/catalog/Dockerfile
     image: checkout-catalog
     environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      CATALOG_FILE: /data/catalog.csv
       WORKERS: "2"
-      DB_POOL_SIZE: "2"
+    volumes:
+      - catalog_data:/data:ro
     ports:
       - "127.0.0.1:8081:8000"
     depends_on:
-      seed:
+      seed-catalog:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
+    networks: [edge, mesh]
 
   checkout:
     build:
@@ -87,17 +163,20 @@ services:
       dockerfile: services/checkout/Dockerfile
     image: checkout-checkout
     environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      DATABASE_URL: postgresql+asyncpg://${CHECKOUT_DB_USER:-checkout_user}:${CHECKOUT_DB_PASSWORD:-checkout_pass}@checkout-db:5432/checkout
+      CATALOG_URL: http://catalog:8000
+      INVENTORY_URL: http://inventory:8000
       WORKERS: "6"
       DB_POOL_SIZE: "10"
-      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
       TX_ABANDON_MINUTES: ${TX_ABANDON_MINUTES:-5}
+      RECOVERY_LEASE_S: "10"
     ports:
       - "127.0.0.1:8082:8000"
     depends_on:
-      seed:
+      seed-checkout:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
+    networks: [edge, mesh, checkout_data]
 
   inventory:
     build:
@@ -105,36 +184,38 @@ services:
       dockerfile: services/inventory/Dockerfile
     image: checkout-inventory
     environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
-      WORKERS: "1"
-      DB_POOL_SIZE: "4"
+      DATABASE_URL: postgresql+asyncpg://${INVENTORY_DB_USER:-inventory_user}:${INVENTORY_DB_PASSWORD:-inventory_pass}@inventory-db:5432/inventory
+      CATALOG_URL: http://catalog:8000
+      WORKERS: "2"
+      DB_POOL_SIZE: "8"
       LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
     ports:
       - "127.0.0.1:8083:8000"
     depends_on:
-      seed:
+      seed-inventory:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
+    networks: [edge, mesh, inventory_data]
 
+  # Exactly one instance: no database, no volume, no replicas (it keeps its window in
+  # memory and writes nothing shared, so there is nothing to elect a leader for).
   analytics:
     build:
       context: .
       dockerfile: services/analytics/Dockerfile
     image: checkout-analytics
     environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
+      CATALOG_URL: http://catalog:8000
+      CHECKOUT_URL: http://checkout:8000
       WORKERS: "1"
-      DB_POOL_SIZE: "4"
       POPULAR_WINDOW_SIZE: "1000"
       POPULAR_SLIDE_INTERVAL: "500"
       POPULAR_POLL_MS: "100"
       POPULAR_GAP_GRACE_MS: "1000"
     ports:
       - "127.0.0.1:8084:8000"
-    depends_on:
-      seed:
-        condition: service_completed_successfully
     healthcheck: *service-healthcheck
+    networks: [edge, mesh]
 
   gateway:
     build:
@@ -157,19 +238,25 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    networks: [edge]
 
-  # On-demand CLIs: docker compose run --rm tools python -m checkout_data.verify_invariant
+  # On-demand: docker compose run --rm tools
+  # Asks each service for its own report over the mesh; it opens no database.
   tools:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile
     image: checkout-tools
     profiles: ["tools"]
-    environment:
-      DATABASE_URL: postgresql+asyncpg://checkout:checkout@postgres:5432/${POSTGRES_DB:-checkout}
-      CATALOG_SIZE: ${CATALOG_SIZE:-2000}
-      STOCK_PER_ITEM: ${STOCK_PER_ITEM:-10000}
-      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
-    depends_on:
-      postgres:
-        condition: service_healthy
+    networks: [mesh]
+
+networks:
+  edge: {}
+  mesh: {}
+  checkout_data: {}
+  inventory_data: {}
 
 volumes:
-  pgdata:
+  checkout_pgdata:
+  inventory_pgdata:
+  catalog_data:

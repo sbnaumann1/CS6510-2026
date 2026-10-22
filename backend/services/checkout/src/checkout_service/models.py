@@ -17,6 +17,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    SmallInteger,
     Text,
     func,
     text,
@@ -103,6 +104,22 @@ class TransactionItem(Base):
         # For the per-SKU sold report, not the hot path.
         Index("transaction_item_sku_idx", "sku"),
     )
+
+
+class ScanLog(Base):
+    """One row naming this incarnation of the scan log.
+
+    Analytics reads the log by position, so it must notice if the log it was reading is
+    replaced (data reset or restored): the token changes whenever that happens, and
+    GET /internal/scans reports it as `logId`.
+    """
+
+    __tablename__ = "scan_log"
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, server_default="1")
+    token: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (CheckConstraint("id = 1", name="scan_log_single_row"),)
 
 
 class Completion(Base):

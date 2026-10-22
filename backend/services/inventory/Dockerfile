@@ -1,6 +1,6 @@
-# Inventory Service image (specs/005-service-architecture/research.md R3).
-# Build context: backend/. Copies only this service's directory plus the shared
-# libraries, so a change in another service never invalidates these layers.
+# Inventory Service image (specs/007-microservices-architecture/contracts/compose-topology.md).
+# Build context: backend/. Copies only this service's directory plus checkout_web (the
+# data-free shared code), so a change in another service never invalidates these layers.
 FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
     SERVICE_NAME=inventory WORKERS=1 UVICORN_HTTP=httptools
@@ -10,14 +10,16 @@ WORKDIR /srv
 COPY services/inventory/requirements.lock /tmp/req.lock
 RUN pip install --no-cache-dir -r /tmp/req.lock
 
-# The shared libraries: the deliberate coupling point, distributed into every image.
-COPY packages/checkout_data /tmp/packages/checkout_data
+# checkout_web: error shape, request parsing, app factory, /healthz, money, request id and the
+# service client. It knows no schema and imports no database library.
 COPY packages/checkout_web /tmp/packages/checkout_web
-RUN pip install --no-cache-dir --no-deps /tmp/packages/checkout_data /tmp/packages/checkout_web
+RUN pip install --no-cache-dir --no-deps /tmp/packages/checkout_web
 
 # This service only.
 COPY services/inventory /tmp/svc
 RUN pip install --no-cache-dir --no-deps /tmp/svc && rm -rf /tmp/packages /tmp/svc /tmp/req.lock
+
+# Seed job: `python -m inventory_service.seed --if-empty` (schema and stock).
 
 EXPOSE 8000
 # Shell form on purpose, so ${WORKERS} and ${UVICORN_HTTP} expand.

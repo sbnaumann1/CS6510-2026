@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# Independent deployability check (spec US2, SC-003; quickstart V6).
+# Independent deployability and failure containment (spec 007 US2, US4; FR-004, FR-006,
+# FR-019; SC-005, SC-006; quickstart V7 and V9).
 #
 # Needs the stack running:  docker compose up -d --build --wait
 #
-# For each of analytics, catalog, inventory: stop it, prove every other route
-# still works through the gateway and the stopped route answers 503 in the
-# contract's error shape, restart it, and wait until healthy. For analytics it
-# also scans 500 items during the outage and checks the restarted pipeline
-# catches up from the shared database. Checkout is not stopped: it carries the
-# load client's whole flow.
+# Part 1  For each service: recreate it alone while the others keep running, and prove the
+#         other three were neither restarted nor made unhealthy.
+# Part 2  For each service: stop it and prove that exactly the routes that depend on it fail,
+#         each with the contract's 503 error shape, and that the rest keep working. Then
+#         restart it and prove the system heals (a refused completion succeeds; Analytics
+#         catches up on scans made while it was down).
 #
 #   ./scripts/check_independence.sh
-#   SKIP_CATCHUP=1 ./scripts/check_independence.sh   # before the persistent pipeline exists
+#   SKIP_CATCHUP=1 ./scripts/check_independence.sh     # skip the 500-scan Analytics drill
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 G=http://localhost:8080
 SLIDE=500
+SERVICES=(catalog checkout inventory analytics)
+FAILED=0
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+pass() { printf '  ok    %s\n' "$1"; }
+fail() { printf '  FAIL  %s\n' "$1" >&2; FAILED=1; }
+expect() {  # <description> <expected> <actual>
+  if [ "$2" = "$3" ]; then pass "$1 ($3)"; else fail "$1: expected $2, got $3"; fi
+}
 
-status() {  # <method> <path> [json-body] -> prints HTTP status
+status() {  # <method> <path> [json-body] -> prints the HTTP status
   local m=$1 p=$2 b=${3:-}
   if [ -n "$b" ]; then
     curl -s -o /dev/null -w '%{http_code}' -X "$m" "$G$p" -H 'content-type: application/json' -d "$b"
@@ -29,101 +36,134 @@ status() {  # <method> <path> [json-body] -> prints HTTP status
   fi
 }
 
-json_field() {  # <field> < json; prints nothing if the body lacks it (e.g. a 503)
-  python3 -c "import sys, json
-try:
-    print(json.load(sys.stdin)[sys.argv[1]])
-except Exception:
-    pass" "$1"
-}
+body() { curl -s -X "$1" "$G$2" ${3:+-H 'content-type: application/json' -d "$3"}; }
 
-start_tx() {
-  curl -s -X POST "$G/transactions" -H 'content-type: application/json' \
-    -d '{"stationId":"independence"}' | json_field transactionId
-}
+json() { python3 -c "import sys,json; print(json.load(sys.stdin)$1)"; }
 
-checkout_flow() {  # start -> scan -> complete must be 201/200/200
-  local tx s c
-  tx=$(start_tx) || fail "start transaction"
-  s=$(status POST "/transactions/$tx/items" '{"sku":"SKU-000001"}')
-  c=$(status POST "/transactions/$tx/complete" '{}')
-  [ "$s" = 200 ] && [ "$c" = 200 ] || fail "checkout flow: scan=$s complete=$c"
-}
+new_tx()  { body POST /transactions '{"stationId":"drill"}' | json '["transactionId"]'; }
+scan()    { status POST "/transactions/$1/items" "{\"sku\":\"${2:-SKU-000001}\"}"; }
 
-max_scan_id() {
-  docker compose exec -T postgres psql -U checkout -d "${POSTGRES_DB:-checkout}" -tAc \
-    "select coalesce(max(id),0) from transaction_item" | tr -d '[:space:]'
-}
+started_at() { docker inspect -f '{{.State.StartedAt}}' "$(docker compose ps -q "$1")"; }
+health()     { docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q "$1")"; }
 
 wait_healthy() {  # <service>
-  local id
-  id=$(docker compose ps -q "$1")
   for _ in $(seq 1 60); do
-    [ "$(docker inspect --format '{{.State.Health.Status}}' "$id")" = healthy ] && return 0
+    [ "$(health "$1" 2>/dev/null)" = healthy ] && return 0
     sleep 1
   done
-  fail "$1 did not become healthy within 60s"
+  fail "$1 did not become healthy"; return 1
 }
 
-expect_down_body() {  # <service> <path>
-  local body want
-  body=$(curl -s "$G$2")
-  want="{\"error\":\"INTERNAL_ERROR\",\"message\":\"$1 service is unavailable.\"}"
-  python3 - "$body" "$want" <<'EOF' || fail "$1 outage body: $body"
-import json, sys
-sys.exit(0 if json.loads(sys.argv[1]) == json.loads(sys.argv[2]) else 1)
-EOF
+error_shape() {  # stdin: a response body; ok if it is the contract's {"error","message"}
+  python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+sys.exit(0 if set(d) == {'error', 'message'} else 1)"
 }
 
-route_of() {  # macOS ships bash 3.2: no associative arrays
-  case "$1" in
-    catalog) echo /items ;;
-    inventory) echo /inventory/low-stock ;;
-    analytics) echo /analytics/popular-items ;;
-  esac
-}
+# --- warm up: Checkout's catalog snapshot, so scans survive a Catalog outage ----------
+TX=$(new_tx); scan "$TX" >/dev/null; body POST "/transactions/$TX/complete" '{}' >/dev/null
 
-for svc in analytics catalog inventory; do
-  echo "== $svc"
-  docker compose stop "$svc" >/dev/null 2>&1
-
-  # The stopped service's route: 503 in the ApiError shape.
-  path=$(route_of "$svc")
-  code=$(status GET "$path")
-  [ "$code" = 503 ] || fail "$svc route returned $code while stopped (want 503)"
-  expect_down_body "$svc" "$path"
-
-  # Every other route keeps working.
-  [ "$svc" = catalog ] || [ "$(status GET /items)" = 200 ] || fail "/items while $svc down"
-  [ "$svc" = inventory ] || [ "$(status GET /inventory/low-stock)" = 200 ] || fail "low-stock while $svc down"
-  [ "$svc" = analytics ] || [ "$(status GET /analytics/popular-items)" = 200 ] || fail "popular while $svc down"
-  checkout_flow
-
-  if [ "$svc" = analytics ]; then
-    tx=$(start_tx)
-    for _ in $(seq 1 $SLIDE); do
-      code=$(status POST "/transactions/$tx/items" '{"sku":"SKU-000002"}')
-      [ "$code" = 200 ] || fail "scan during analytics outage returned $code"
-    done
-    echo "   scanned $SLIDE items while analytics was down"
-  fi
-
-  docker compose start "$svc" >/dev/null 2>&1
-  wait_healthy "$svc"
-
-  if [ "$svc" = analytics ] && [ -z "${SKIP_CATCHUP:-}" ]; then
-    want=$(( $(max_scan_id) / SLIDE * SLIDE ))
-    got=""
-    # The gateway re-resolves upstream addresses every 5 s (nginx `resolver
-    # valid=5s`), so it may answer 503 briefly after a restart even though the
-    # container is healthy. Allow 15 s for routing to recover plus catch-up.
-    for _ in $(seq 1 150); do
-      got=$(curl -s "$G/analytics/popular-items" | json_field windowEnd)
-      [ "$got" = "$want" ] && break
-      sleep 0.1
-    done
-    [ "$got" = "$want" ] || fail "analytics catch-up: windowEnd=${got:-<no window>}, want $want"
-    echo "   caught up: windowEnd=$got"
-  fi
-  echo "PASS $svc"
+echo "== Part 1: recreate one service alone"
+for svc in "${SERVICES[@]}"; do
+  others=(); for s in "${SERVICES[@]}"; do [ "$s" != "$svc" ] && others+=("$s"); done
+  for o in "${others[@]}"; do printf -v "before_$o" '%s' "$(started_at "$o")"; done  # bash 3.2: no maps
+  docker compose up -d --no-deps --force-recreate "$svc" >/dev/null 2>&1
+  wait_healthy "$svc" || true
+  for o in "${others[@]}"; do
+    was="before_$o"
+    if [ "$(started_at "$o")" = "${!was}" ] && [ "$(health "$o")" = healthy ]; then
+      pass "$o untouched while $svc was recreated"
+    else
+      fail "$o was restarted or unhealthy while $svc was recreated"
+    fi
+  done
 done
+
+echo "== Part 2: stop one service at a time"
+
+# Part 1 recreated Checkout, which keeps its catalog snapshot in memory: warm it again, so
+# the Catalog outage below tests what it means to (a warm snapshot keeps scans working).
+TX=$(new_tx); scan "$TX" >/dev/null; body POST "/transactions/$TX/complete" '{}' >/dev/null
+
+# -- catalog: the snapshots are warm, so nothing but /items itself fails
+echo " catalog down"
+docker compose stop catalog >/dev/null 2>&1
+expect "GET /items"                        503 "$(status GET /items)"
+body GET /items | error_shape && pass "/items failure has the contract's error shape" || fail "/items failure shape"
+TX=$(new_tx)
+expect "start a transaction"               201 "$(status POST /transactions '{"stationId":"drill"}')"
+expect "scan (catalog snapshot is warm)"   200 "$(scan "$TX")"
+expect "complete"                          200 "$(status POST "/transactions/$TX/complete" '{}')"
+expect "GET /inventory/low-stock"          200 "$(status GET /inventory/low-stock)"
+expect "GET /analytics/popular-items"      200 "$(status GET /analytics/popular-items)"
+docker compose start catalog >/dev/null 2>&1; wait_healthy catalog || true
+
+# -- inventory: completion is refused cleanly and can be retried
+echo " inventory down"
+TX=$(new_tx); scan "$TX" >/dev/null; scan "$TX" >/dev/null
+docker compose stop inventory >/dev/null 2>&1
+expect "GET /items"                        200 "$(status GET /items)"
+expect "scan"                              200 "$(scan "$TX")"
+t0=$(date +%s)
+code=$(status POST "/transactions/$TX/complete" '{}')
+elapsed=$(( $(date +%s) - t0 ))
+expect "complete is refused"               503 "$code"
+[ "$elapsed" -le 5 ] && pass "refusal came within 5 s (${elapsed}s)" || fail "refusal took ${elapsed}s"
+body POST "/transactions/$TX/complete" '{}' | error_shape && pass "refusal has the contract's error shape" || fail "refusal shape"
+expect "the transaction is still open"     OPEN "$(body GET "/transactions/$TX" | json '["status"]')"
+expect "GET /inventory/low-stock"          503 "$(status GET /inventory/low-stock)"
+expect "GET /analytics/popular-items"      200 "$(status GET /analytics/popular-items)"
+docker compose start inventory >/dev/null 2>&1; wait_healthy inventory || true
+expect "the same transaction now completes" 200 "$(status POST "/transactions/$TX/complete" '{}')"
+
+# -- analytics: nobody depends on it during scans or completion
+echo " analytics down"
+docker compose stop analytics >/dev/null 2>&1
+TX=$(new_tx)
+expect "start a transaction"               201 "$(status POST /transactions '{"stationId":"drill"}')"
+expect "scan"                              200 "$(scan "$TX")"
+expect "complete"                          200 "$(status POST "/transactions/$TX/complete" '{}')"
+expect "GET /analytics/popular-items"      503 "$(status GET /analytics/popular-items)"
+if [ -z "${SKIP_CATCHUP:-}" ]; then
+  max_before=$(curl -s localhost:8082/internal/reports/scan-count | json '["maxScanId"]')
+  for _ in $(seq 1 25); do
+    t=$(new_tx); for _ in $(seq 1 20); do scan "$t" SKU-000002 >/dev/null; done
+  done
+  max_after=$(curl -s localhost:8082/internal/reports/scan-count | json '["maxScanId"]')
+  docker compose start analytics >/dev/null 2>&1; wait_healthy analytics || true
+  target=$(( max_after - max_after % SLIDE ))
+  ok=0
+  for _ in $(seq 1 30); do
+    end=$(body GET /analytics/popular-items | json '["windowEnd"]')
+    [ "$end" -ge "$target" ] && { ok=1; break; }
+    sleep 1
+  done
+  [ $ok -eq 1 ] && pass "popular-items caught up to scan $target within 30 s ($((max_after - max_before)) scans made while down)" \
+                || fail "popular-items stuck at ${end:-?}, wanted at least $target"
+else
+  docker compose start analytics >/dev/null 2>&1; wait_healthy analytics || true
+fi
+
+# -- checkout: its own routes fail; Analytics serves what it has, and rebuilds from Checkout
+echo " checkout down"
+docker compose stop checkout >/dev/null 2>&1
+expect "GET /items"                        200 "$(status GET /items)"
+expect "GET /inventory/low-stock"          200 "$(status GET /inventory/low-stock)"
+expect "GET /analytics/popular-items (serves its last ranking)" 200 "$(status GET /analytics/popular-items)"
+expect "POST /transactions"                503 "$(status POST /transactions '{"stationId":"drill"}')"
+echo " checkout down, analytics restarted meanwhile"
+docker compose restart analytics >/dev/null 2>&1; wait_healthy analytics || true
+end=$(body GET /analytics/popular-items | json '["windowEnd"]')
+expect "Analytics answers with the empty window, not an error" 0 "$end"
+docker compose start checkout >/dev/null 2>&1; wait_healthy checkout || true
+ok=0
+for _ in $(seq 1 30); do
+  end=$(body GET /analytics/popular-items | json '["windowEnd"]')
+  [ "$end" -gt 0 ] && { ok=1; break; }
+  sleep 1
+done
+[ $ok -eq 1 ] && pass "Analytics rebuilt its window once Checkout was back (windowEnd $end)" \
+              || fail "Analytics did not recover after Checkout returned"
+
+[ $FAILED -eq 0 ] && echo "independence: PASS" || { echo "independence: FAIL" >&2; exit 1; }

@@ -14,6 +14,7 @@ so the hot-SKU stock locks live only inside Inventory.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from checkout_service import catalog_client, inventory_client, repo
@@ -87,12 +88,24 @@ async def rollback(tx_id: int, epoch: int, *, reason: str = "") -> None:
              elapsed_ms=(time.monotonic() - t0) * 1000)
 
 
-async def complete(tx_id: int) -> dict[str, Any]:
-    """POST /transactions/{id}/complete."""
-    public = public_id(tx_id)
-    started = time.monotonic()
+@dataclass(frozen=True)
+class _Begun:
+    tx: Any
+    basket: Any
+    total_cents: int
+    epoch: int
+    took_over: bool
 
-    # Step 1: decide whether to start, join or refuse, and record COMPLETING.
+
+@dataclass(frozen=True)
+class _Compensating:
+    """A previous attempt's rollback was never delivered; its release is still owed."""
+
+    epoch: int
+
+
+async def _begin(tx_id: int, public: str) -> _Begun | _Compensating:
+    """Step 1: decide whether to start, take over or refuse, and record COMPLETING."""
     async with SessionLocal() as session:
         async with session.begin():
             tx = await repo.lock_transaction(session, tx_id)
@@ -109,27 +122,43 @@ async def complete(tx_id: int) -> dict[str, Any]:
                     raise ApiError(EMPTY_BASKET, f"Transaction {public} has no scanned items.")
                 total_cents = sum(b.unit_price_cents * b.qty for b in basket)
                 epoch = await repo.mark_completing(session, tx_id, total_cents)
-                joined = False
-            else:
-                completion = await repo.get_completion(
-                    session, tx_id, settings.recovery_lease_s
+                return _Begun(tx, basket, total_cents, epoch, took_over=False)
+
+            completion = await repo.get_completion(session, tx_id, settings.recovery_lease_s)
+            if completion is None:  # pragma: no cover - COMPLETING always has a record
+                raise UpstreamUnavailable("checkout", "the completion record is missing")
+            if completion.state == "COMPENSATING":
+                return _Compensating(completion.epoch)
+            if completion.fresh:
+                # A live driver is on it: a concurrent duplicate is refused exactly as 005
+                # refused the second of two overlapping completes (INV-3).
+                raise ApiError(
+                    TRANSACTION_NOT_OPEN, f"Transaction {public} is already completing."
                 )
-                if completion is not None and completion.fresh:
-                    # A live driver is on it: a concurrent duplicate is refused exactly as
-                    # 005 refused the second of two overlapping completes (INV-3).
-                    raise ApiError(
-                        TRANSACTION_NOT_OPEN, f"Transaction {public} is already completing."
-                    )
-                if completion is None or completion.state == "COMPENSATING":
-                    raise UpstreamUnavailable(
-                        "checkout", "the completion is being rolled back; retry shortly"
-                    )
-                # The driver is gone (its lease expired): this retry takes the saga over.
-                # Every step is idempotent, so taking over cannot double-apply anything.
-                await repo.set_completion_state(session, tx_id, completion.state)
-                total_cents = completion.total_cents
-                epoch = completion.epoch
-                joined = True
+            # The driver is gone (its lease expired): this retry takes the saga over. Every
+            # step is idempotent, so taking over cannot double-apply anything.
+            await repo.set_completion_state(session, tx_id, completion.state)
+            return _Begun(tx, basket, completion.total_cents, completion.epoch, took_over=True)
+
+
+async def complete(tx_id: int) -> dict[str, Any]:
+    """POST /transactions/{id}/complete."""
+    public = public_id(tx_id)
+    started = time.monotonic()
+
+    begun = await _begin(tx_id, public)
+    if isinstance(begun, _Compensating):
+        # The shopper is retrying after a refusal whose rollback could not be delivered
+        # (Inventory was down). Finish that rollback, then start a fresh attempt; if the
+        # release still cannot be delivered this is a clean 503 and the transaction is
+        # untouched.
+        await rollback(tx_id, begun.epoch, reason="finishing an undelivered rollback")
+        begun = await _begin(tx_id, public)
+        if isinstance(begun, _Compensating):  # pragma: no cover - defensive
+            raise UpstreamUnavailable("checkout", "the completion is still being rolled back")
+    tx, basket, total_cents, epoch, joined = (
+        begun.tx, begun.basket, begun.total_cents, begun.epoch, begun.took_over
+    )
     log_step("begin", tx=public, outcome="took-over" if joined else "ok",
              elapsed_ms=(time.monotonic() - started) * 1000)
 
