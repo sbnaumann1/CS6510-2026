@@ -113,6 +113,9 @@ class Completion(Base):
     transaction_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("transaction.id"), primary_key=True
     )
+    # Which attempt this is: a transaction whose completion was rolled back is open again,
+    # and its next attempt reserves stock under a new epoch (Inventory keys by it).
+    epoch: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     state: Mapped[str] = mapped_column(Text, nullable=False)
     total_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -123,8 +126,8 @@ class Completion(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "state IN ('RESERVING', 'RESERVED', 'COMPLETED', 'COMPENSATING')",
+            "state IN ('RESERVING', 'RESERVED', 'COMPLETED', 'COMPENSATING', 'ABORTED')",
             name="completion_state",
         ),
-        Index("completion_open_idx", "updated_at", postgresql_where=text("state <> 'COMPLETED'")),
+        Index("completion_open_idx", "updated_at", postgresql_where=text("state NOT IN ('COMPLETED', 'ABORTED')")),
     )

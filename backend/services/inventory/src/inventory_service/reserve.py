@@ -56,8 +56,8 @@ alerts AS (
   RETURNING 1
 ),
 adj AS (
-  INSERT INTO stock_adjustment (transaction_id, state, lines)
-  SELECT :tx_id, 'APPLIED', CAST(:lines AS jsonb) WHERE (SELECT ok FROM ok)
+  INSERT INTO stock_adjustment (transaction_id, epoch, state, lines)
+  SELECT :tx_id, :epoch, 'APPLIED', CAST(:lines AS jsonb) WHERE (SELECT ok FROM ok)
   RETURNING 1
 )
 SELECT (SELECT ok FROM ok) AS ok,
@@ -69,17 +69,19 @@ SELECT (SELECT ok FROM ok) AS ok,
 )
 
 _GET_ADJUSTMENT = text(
-    "SELECT state, lines FROM stock_adjustment WHERE transaction_id = :tx_id"
+    "SELECT state, lines FROM stock_adjustment"
+    " WHERE transaction_id = :tx_id AND epoch = :epoch"
 )
 
 _LOCK_ADJUSTMENT = text(
-    "SELECT state, lines FROM stock_adjustment WHERE transaction_id = :tx_id FOR UPDATE"
+    "SELECT state, lines FROM stock_adjustment"
+    " WHERE transaction_id = :tx_id AND epoch = :epoch FOR UPDATE"
 )
 
 _TOMBSTONE = text(
-    "INSERT INTO stock_adjustment (transaction_id, state, lines)"
-    " VALUES (:tx_id, 'RELEASED', CAST('[]' AS jsonb))"
-    " ON CONFLICT (transaction_id) DO NOTHING RETURNING transaction_id"
+    "INSERT INTO stock_adjustment (transaction_id, epoch, state, lines)"
+    " VALUES (:tx_id, :epoch, 'RELEASED', CAST('[]' AS jsonb))"
+    " ON CONFLICT (transaction_id, epoch) DO NOTHING RETURNING transaction_id"
 )
 
 # Units go back in SKU order too, so a release cannot deadlock against a reserve.
@@ -100,7 +102,7 @@ UPDATE inventory_stock s SET current_stock = s.current_stock + v.qty
 
 _MARK_RELEASED = text(
     "UPDATE stock_adjustment SET state = 'RELEASED', updated_at = now()"
-    " WHERE transaction_id = :tx_id"
+    " WHERE transaction_id = :tx_id AND epoch = :epoch"
 )
 
 
@@ -132,8 +134,10 @@ def _normalize(lines: Sequence[tuple[str, int]]) -> list[tuple[str, int]]:
     return sorted(merged.items())
 
 
-async def _recorded(session: AsyncSession, tx_id: int) -> Reserved | AlreadyReleased | None:
-    row = (await session.execute(_GET_ADJUSTMENT, {"tx_id": tx_id})).first()
+async def _recorded(
+    session: AsyncSession, tx_id: int, epoch: int
+) -> Reserved | AlreadyReleased | None:
+    row = (await session.execute(_GET_ADJUSTMENT, {"tx_id": tx_id, "epoch": epoch})).first()
     if row is None:
         return None
     return Reserved(replayed=True) if row.state == "APPLIED" else AlreadyReleased()
@@ -144,14 +148,19 @@ async def reserve(
     tx_id: int,
     lines: Sequence[tuple[str, int]],
     threshold: int,
+    *,
+    epoch: int = 1,
 ) -> Reserved | Short | AlreadyReleased:
-    """Reduce stock for `lines` once for `tx_id`. Call inside the caller's transaction."""
+    """Reduce stock for `lines` once for attempt `epoch` of `tx_id`.
+
+    Call inside the caller's transaction."""
     basket = _normalize(lines)
-    if (known := await _recorded(session, tx_id)) is not None:
+    if (known := await _recorded(session, tx_id, epoch)) is not None:
         return known
 
     params = {
         "tx_id": tx_id,
+        "epoch": epoch,
         "skus": [sku for sku, _ in basket],
         "qtys": [qty for _, qty in basket],
         "thr": threshold,
@@ -164,7 +173,7 @@ async def reserve(
             res = (await session.execute(_RESERVE, params)).one()
     except IntegrityError:
         # A concurrent reserve or release for the same transaction won the insert.
-        known = await _recorded(session, tx_id)
+        known = await _recorded(session, tx_id, epoch)
         if known is None:  # pragma: no cover - the row was just seen to exist
             raise
         return known
@@ -173,12 +182,12 @@ async def reserve(
     return Reserved(replayed=False)
 
 
-async def release(session: AsyncSession, tx_id: int) -> Released:
-    """Reverse `tx_id`'s reservation once, or record that none may follow."""
-    if (await session.execute(_TOMBSTONE, {"tx_id": tx_id})).first() is not None:
+async def release(session: AsyncSession, tx_id: int, *, epoch: int = 1) -> Released:
+    """Reverse attempt `epoch` of `tx_id` once, or record that none may follow."""
+    if (await session.execute(_TOMBSTONE, {"tx_id": tx_id, "epoch": epoch})).first() is not None:
         return Released(units_restored=0, already_released=False)
 
-    row = (await session.execute(_LOCK_ADJUSTMENT, {"tx_id": tx_id})).one()
+    row = (await session.execute(_LOCK_ADJUSTMENT, {"tx_id": tx_id, "epoch": epoch})).one()
     if row.state == "RELEASED":
         return Released(units_restored=0, already_released=True)
 
@@ -187,5 +196,5 @@ async def release(session: AsyncSession, tx_id: int) -> Released:
         _RESTORE,
         {"skus": [sku for sku, _ in lines], "qtys": [qty for _, qty in lines]},
     )
-    await session.execute(_MARK_RELEASED, {"tx_id": tx_id})
+    await session.execute(_MARK_RELEASED, {"tx_id": tx_id, "epoch": epoch})
     return Released(units_restored=sum(qty for _, qty in lines), already_released=False)

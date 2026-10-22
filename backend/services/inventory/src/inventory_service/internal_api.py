@@ -32,6 +32,16 @@ def _parse_tx(public_id: Any) -> int:
     return int(m.group(1))
 
 
+def _parse_epoch(raw: Any) -> int:
+    try:
+        epoch = int(raw)
+    except (TypeError, ValueError):
+        epoch = 0
+    if epoch < 1 or isinstance(raw, bool):
+        raise ApiError(INVALID_REQUEST, "'epoch' must be a positive integer.")
+    return epoch
+
+
 def _parse_lines(raw: Any) -> list[tuple[str, int]]:
     if not isinstance(raw, list) or not raw:
         raise ApiError(INVALID_REQUEST, "'lines' must be a non-empty list.")
@@ -55,12 +65,13 @@ async def reserve_stock(request: Request) -> Response:
     body = await _json_body(request, required=True)
     public_id = body.get("transactionId")
     tx_id = _parse_tx(public_id)
+    epoch = _parse_epoch(body.get("epoch"))
     lines = _parse_lines(body.get("lines"))
 
     async with SessionLocal() as session:
         async with session.begin():
             result = await reservations.reserve(
-                session, tx_id, lines, settings.low_stock_threshold
+                session, tx_id, lines, settings.low_stock_threshold, epoch=epoch
             )
 
     def done(outcome: str) -> None:
@@ -72,6 +83,7 @@ async def reserve_stock(request: Request) -> Response:
         return ORJSONResponse(
             content={
                 "transactionId": public_id,
+                "epoch": epoch,
                 "state": "APPLIED",
                 "replayed": result.replayed,
             }
@@ -97,12 +109,13 @@ async def reserve_stock(request: Request) -> Response:
 
 
 @router.delete("/internal/reservations/{transaction_id}")
-async def release_stock(transaction_id: str) -> Response:
+async def release_stock(transaction_id: str, request: Request) -> Response:
     started = time.monotonic()
     tx_id = _parse_tx(transaction_id)
+    epoch = _parse_epoch(request.query_params.get("epoch"))
     async with SessionLocal() as session:
         async with session.begin():
-            result = await reservations.release(session, tx_id)
+            result = await reservations.release(session, tx_id, epoch=epoch)
     log_step(
         "release",
         tx=transaction_id,
@@ -111,6 +124,7 @@ async def release_stock(transaction_id: str) -> Response:
     )
     content: dict[str, Any] = {
         "transactionId": transaction_id,
+        "epoch": epoch,
         "state": "RELEASED",
         "unitsRestored": result.units_restored,
     }

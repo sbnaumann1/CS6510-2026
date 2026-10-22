@@ -70,17 +70,21 @@ _SWEEP_ABANDONED = text(
 
 _MARK_COMPLETING = text("UPDATE transaction SET status = 'COMPLETING' WHERE id = :tx_id")
 
+# Starting a saga: the first attempt is epoch 1, and every later attempt on the same
+# transaction (after a rollback) is the next epoch.
 _UPSERT_COMPLETION = text(
-    "INSERT INTO completion (transaction_id, state, total_cents)"
-    " VALUES (:tx_id, 'RESERVING', :total)"
+    "INSERT INTO completion (transaction_id, epoch, state, total_cents)"
+    " VALUES (:tx_id, 1, 'RESERVING', :total)"
     " ON CONFLICT (transaction_id) DO UPDATE"
     "   SET state = 'RESERVING', total_cents = EXCLUDED.total_cents,"
+    "       epoch = completion.epoch + 1,"
     "       attempts = 0, updated_at = now(), last_error = NULL"
+    " RETURNING epoch"
 )
 
 # `fresh`: a live driver touched this completion within the lease, so it is in flight.
 _GET_COMPLETION = text(
-    "SELECT state, total_cents, attempts,"
+    "SELECT state, epoch, total_cents, attempts,"
     "       updated_at > now() - make_interval(secs => :lease) AS fresh"
     "  FROM completion WHERE transaction_id = :tx_id"
 )
@@ -88,7 +92,7 @@ _GET_COMPLETION = text(
 _SET_COMPLETION_STATE = text(
     "UPDATE completion SET state = :state, updated_at = now(),"
     "       last_error = coalesce(:err, last_error)"
-    " WHERE transaction_id = :tx_id AND state <> 'COMPLETED'"
+    " WHERE transaction_id = :tx_id AND state NOT IN ('COMPLETED', 'ABORTED')"
 )
 
 # Step 3: guarded by status = 'COMPLETING', so a second driver (a retried request or the
@@ -107,15 +111,17 @@ WITH fin AS (
 SELECT completed_at FROM fin
 """)
 
-# Roll back: the transaction is open again and the saga's record is gone.
+# Roll back: the transaction is open again and the saga's record is closed. The row stays so
+# the next attempt gets the next epoch.
 _REOPEN = text("""
 WITH t AS (
     UPDATE transaction SET status = 'OPEN'
      WHERE id = :tx_id AND status = 'COMPLETING'
     RETURNING id
 )
-DELETE FROM completion
- WHERE transaction_id = :tx_id AND state <> 'COMPLETED' AND EXISTS (SELECT 1 FROM t)
+UPDATE completion SET state = 'ABORTED', updated_at = now()
+ WHERE transaction_id = :tx_id AND state NOT IN ('COMPLETED', 'ABORTED')
+   AND EXISTS (SELECT 1 FROM t)
 """)
 
 # Claim stuck completions by bumping their lease. SKIP LOCKED lets several Checkout
@@ -124,10 +130,10 @@ _CLAIM_STUCK = text("""
 UPDATE completion SET updated_at = now(), attempts = attempts + 1
  WHERE transaction_id IN (
         SELECT transaction_id FROM completion
-         WHERE state <> 'COMPLETED'
+         WHERE state NOT IN ('COMPLETED', 'ABORTED')
            AND updated_at < now() - make_interval(secs => :lease)
          ORDER BY updated_at LIMIT :n FOR UPDATE SKIP LOCKED)
-RETURNING transaction_id, state, total_cents
+RETURNING transaction_id, epoch, state, total_cents
 """)
 
 # --- scan log read by Analytics, and the verification reports -----------------------
@@ -145,7 +151,9 @@ _SOLD_BY_SKU = text(
 )
 _COMPLETED_IDS = text("SELECT id FROM transaction WHERE status = 'COMPLETED' ORDER BY id")
 _COMPLETING_COUNT = text("SELECT count(*) FROM transaction WHERE status = 'COMPLETING'")
-_OPEN_COMPLETIONS = text("SELECT count(*) FROM completion WHERE state <> 'COMPLETED'")
+_OPEN_COMPLETIONS = text(
+    "SELECT count(*) FROM completion WHERE state NOT IN ('COMPLETED', 'ABORTED')"
+)
 
 
 async def insert_transaction(session: AsyncSession, station_id: str) -> Row:
@@ -191,9 +199,12 @@ async def sweep_abandoned(session: AsyncSession, minutes: int) -> int:
     return result.rowcount or 0
 
 
-async def mark_completing(session: AsyncSession, tx_id: int, total_cents: int) -> None:
+async def mark_completing(session: AsyncSession, tx_id: int, total_cents: int) -> int:
+    """Start a saga and return its epoch."""
     await session.execute(_MARK_COMPLETING, {"tx_id": tx_id})
-    await session.execute(_UPSERT_COMPLETION, {"tx_id": tx_id, "total": total_cents})
+    return int(
+        await session.scalar(_UPSERT_COMPLETION, {"tx_id": tx_id, "total": total_cents})
+    )
 
 
 async def get_completion(session: AsyncSession, tx_id: int, lease_s: float) -> Row | None:

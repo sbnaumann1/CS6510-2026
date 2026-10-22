@@ -39,7 +39,9 @@ async def run_once(lease_s: float | None = None) -> int:
                 completed_at = await saga.finalize_step(row.transaction_id, row.total_cents)
                 outcome = "finalized" if completed_at is not None else "already-done"
             else:
-                await saga.rollback(row.transaction_id, reason=f"recovered from {row.state}")
+                await saga.rollback(
+                    row.transaction_id, row.epoch, reason=f"recovered from {row.state}"
+                )
                 outcome = "rolled-back"
             log_step("recover", tx=public, outcome=outcome, from_state=row.state)
             done += 1

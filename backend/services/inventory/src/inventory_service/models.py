@@ -36,15 +36,19 @@ class InventoryStock(Base):
 
 
 class StockAdjustment(Base):
-    """The idempotency record for one transaction's reservation.
+    """The idempotency record for one completion attempt's reservation.
 
-    `RELEASED` with empty `lines` and no earlier `APPLIED` is a tombstone: it makes a
-    reserve that arrives after its release refuse instead of apply.
+    Keyed by the transaction and the attempt (`epoch`): a transaction whose completion was
+    rolled back is open again, and its next attempt is a new epoch, so an old release never
+    blocks it. `RELEASED` with empty `lines` and no earlier `APPLIED` is a tombstone: it
+    makes a reserve of the *same* epoch that arrives after its release refuse instead of
+    apply.
     """
 
     __tablename__ = "stock_adjustment"
 
     transaction_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    epoch: Mapped[int] = mapped_column(Integer, primary_key=True, server_default="1")
     state: Mapped[str] = mapped_column(Text, nullable=False)
     lines: Mapped[list] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[object] = mapped_column(

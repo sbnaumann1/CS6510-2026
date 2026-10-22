@@ -68,7 +68,7 @@ async def finalize_step(tx_id: int, total_cents: int) -> Any:
             return await repo.finalize(session, tx_id, total_cents)
 
 
-async def rollback(tx_id: int, *, reason: str = "") -> None:
+async def rollback(tx_id: int, epoch: int, *, reason: str = "") -> None:
     """Compensate: release the reservation, then reopen the transaction.
 
     If the release cannot be delivered the completion stays COMPENSATING for the recovery
@@ -77,7 +77,7 @@ async def rollback(tx_id: int, *, reason: str = "") -> None:
     t0 = time.monotonic()
     await _set_state(tx_id, "COMPENSATING", reason or None)
     try:
-        await inventory_client.get_client().release(public)
+        await inventory_client.get_client().release(public, epoch)
     except UpstreamUnavailable:
         log_step("release", tx=public, outcome="undelivered",
                  elapsed_ms=(time.monotonic() - t0) * 1000)
@@ -108,7 +108,7 @@ async def complete(tx_id: int) -> dict[str, Any]:
                 if not basket:
                     raise ApiError(EMPTY_BASKET, f"Transaction {public} has no scanned items.")
                 total_cents = sum(b.unit_price_cents * b.qty for b in basket)
-                await repo.mark_completing(session, tx_id, total_cents)
+                epoch = await repo.mark_completing(session, tx_id, total_cents)
                 joined = False
             else:
                 completion = await repo.get_completion(
@@ -128,6 +128,7 @@ async def complete(tx_id: int) -> dict[str, Any]:
                 # Every step is idempotent, so taking over cannot double-apply anything.
                 await repo.set_completion_state(session, tx_id, completion.state)
                 total_cents = completion.total_cents
+                epoch = completion.epoch
                 joined = True
     log_step("begin", tx=public, outcome="took-over" if joined else "ok",
              elapsed_ms=(time.monotonic() - started) * 1000)
@@ -135,10 +136,12 @@ async def complete(tx_id: int) -> dict[str, Any]:
     # Step 2: reserve stock in Inventory.
     t0 = time.monotonic()
     try:
-        reserved = await inventory_client.get_client().reserve(public, _lines(basket))
+        reserved = await inventory_client.get_client().reserve(
+            public, epoch, _lines(basket)
+        )
     except UpstreamUnavailable as exc:
         log_step("reserve", tx=public, outcome="timeout", elapsed_ms=(time.monotonic() - t0) * 1000)
-        await rollback(tx_id, reason=str(exc))
+        await rollback(tx_id, epoch, reason=str(exc))
         raise
     if isinstance(reserved, inventory_client.Insufficient):
         await reopen(tx_id)
@@ -160,7 +163,7 @@ async def complete(tx_id: int) -> dict[str, Any]:
         completed_at = await finalize_step(tx_id, total_cents)
     except Exception as exc:  # database failure after stock was reserved
         log_step("finalize", tx=public, outcome="error", elapsed_ms=(time.monotonic() - t0) * 1000)
-        await rollback(tx_id, reason=f"finalize failed: {type(exc).__name__}")
+        await rollback(tx_id, epoch, reason=f"finalize failed: {type(exc).__name__}")
         raise ApiError(ROLLED_BACK, "Completion failed and was rolled back; retry.") from exc
     if completed_at is None:
         # Another driver finished it, or rolled it back, while this call was in flight.

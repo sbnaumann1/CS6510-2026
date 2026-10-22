@@ -41,13 +41,14 @@ class InventoryClient:
         self._client = ServiceClient(base_url, transport=transport, peer="inventory")
 
     async def reserve(
-        self, public_id: str, lines: Sequence[tuple[str, int]]
+        self, public_id: str, epoch: int, lines: Sequence[tuple[str, int]]
     ) -> Applied | Insufficient | ReservationReleased:
         response = await self._client.request(
             "POST",
             "/internal/reservations",
             json={
                 "transactionId": public_id,
+                "epoch": epoch,
                 "lines": [{"sku": sku, "quantity": qty} for sku, qty in lines],
             },
             timeout=RESERVE_TIMEOUT_S,
@@ -64,10 +65,11 @@ class InventoryClient:
             return ReservationReleased()
         raise UpstreamUnavailable("inventory", f"HTTP {response.status_code}")
 
-    async def release(self, public_id: str) -> None:
+    async def release(self, public_id: str, epoch: int) -> None:
         response = await self._client.request(
             "DELETE",
             f"/internal/reservations/{public_id}",
+            params={"epoch": epoch},
             timeout=RESERVE_TIMEOUT_S,
             retries=RETRIES,
             idempotent=True,
