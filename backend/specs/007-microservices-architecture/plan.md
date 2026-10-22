@@ -7,8 +7,7 @@
 ## Summary
 
 Spec 005's four domain services stop sharing one PostgreSQL database and the `checkout_data`
-library. Each gets **its own PostgreSQL instance on its own private network** and its own
-data-access code. The frozen contract, the nginx gateway's public routes and the unmodified load
+library. Checkout, Inventory and Analytics each get **their own PostgreSQL instance on its own private network**, and Catalog keeps its fixed list in **a read-only file only it can open**. Each service has its own data-access code. The frozen contract, the nginx gateway's public routes and the unmodified load
 client do not change.
 
 Three things were free under a shared database and now need design:
@@ -34,9 +33,9 @@ retries and a propagated request id. No broker is introduced ([research R7](./re
 
 **Primary Dependencies**: FastAPI + uvicorn (uvloop, httptools), SQLAlchemy 2 async + asyncpg, orjson (all unchanged); **httpx** added to every service image for service-to-service calls; nginx for the gateway (unchanged)
 
-**Storage**: PostgreSQL 17, **four instances**: `catalog-db`, `checkout-db`, `inventory-db`, `analytics-db`; one schema, one role, one private network each
+**Storage**: PostgreSQL 17, **three instances**: `checkout-db`, `inventory-db`, `analytics-db` (one schema, one role, one private network each); Catalog: a read-only `catalog.csv` on a volume mounted only into Catalog and its seed job
 
-**Testing**: pytest + pytest-asyncio against native PostgreSQL (four `*_test` databases); in-process service apps joined by a fault-injecting ASGI transport; compose-level failure drills; the graded load client
+**Testing**: pytest + pytest-asyncio against native PostgreSQL (three `*_test` databases plus a temporary catalog file); in-process service apps joined by a fault-injecting ASGI transport; compose-level failure drills; the graded load client
 
 **Target Platform**: Docker Compose on Docker Desktop (macOS), as in 005
 
@@ -46,7 +45,7 @@ retries and a propagated request id. No broker is introduced ([research R7](./re
 
 **Constraints**: contract unchanged; stock never negative; no cross-database transactions; no service ever connects to another's database; every cross-service call has a deadline
 
-**Scale/Scope**: 4 services, 4 databases, 1 cross-service write flow (completion), 1 async feed (scans), 2000-item catalog; load client up to 100 stations
+**Scale/Scope**: 4 services, 3 databases and 1 file store, 1 cross-service write flow (completion), 1 async feed (scans), 2000-item catalog; load client up to 100 stations
 
 ## Constitution Check
 
@@ -89,7 +88,7 @@ specs/007-microservices-architecture/
 
 ```text
 backend/
-├── compose.yaml                     # 4 DBs, 4 seeds, 4 services, gateway, tools; networks per topology contract
+├── compose.yaml                     # 3 DBs + catalog volume, 4 seeds, 4 services, gateway, tools; networks per topology contract
 ├── compose.test.yaml
 ├── gateway/                         # nginx.conf: + /internal/ blocked, + X-Request-ID
 ├── packages/
@@ -99,7 +98,7 @@ backend/
 ├── services/
 │   ├── catalog/src/catalog_service/
 │   │   ├── main.py  api.py
-│   │   ├── db.py  models.py  repo.py  seed.py        # own data layer (was shared checkout_data)
+│   │   ├── config.py  store.py  seed.py              # reads/writes catalog.csv; no database, no SQLAlchemy
 │   ├── checkout/src/checkout_service/
 │   │   ├── main.py  api.py  service.py
 │   │   ├── db.py  models.py  repo.py  seed.py
@@ -129,7 +128,7 @@ backend/
     ├── failure/                     # fault-injection per saga step (FR-023)
     ├── unit/
     ├── _dispatch.py                 # gateway twin + inter-service ASGI mesh with fault hooks
-    └── conftest.py                  # four databases instead of one
+    └── conftest.py                  # three databases and a temp catalog file instead of one database
 ```
 
 **Structure Decision**: Keep 005's layout (one directory per service, shared `checkout_web` for

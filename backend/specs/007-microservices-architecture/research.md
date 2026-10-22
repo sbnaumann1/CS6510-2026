@@ -127,29 +127,36 @@ shopper needs for completion is synchronous anyway.
 **Alternatives**: RabbitMQ/Kafka/NATS (operational weight and new failure modes for one async
 feed that a cursor relay handles); gRPC (new toolchain, no benefit at this scale).
 
-## R8. Database per service on private networks
+## R8. Private store per service: three databases and one file
 
-**Decision**: Four `postgres:17` containers. Each has its own role/password and sits on a network
-shared only with its owning service and that service's seed job. Services also join a `mesh`
+**Decision**: Checkout, Inventory and Analytics each get a `postgres:17` container with its own
+role/password, on a network shared only with its owning service and that service's seed job.
+Catalog has **no database**: its data is a fixed list written once by `seed-catalog` to
+`catalog.csv` (header `sku,name,price_cents`) on a named volume. The volume is mounted read-write
+into `seed-catalog` and **read-only** into `catalog`, and into nothing else. Catalog loads the file
+into memory at startup and serves `GET /items` from it. Services also join a `mesh`
 network (service ↔ service) and `edge` (gateway ↔ service). No service is attached to another
 service's database network. Tuning: `synchronous_commit=off`, `wal_compression=on` kept;
-`shared_buffers` sized per workload (checkout 512 MB, analytics 256 MB, inventory 128 MB,
-catalog 64 MB), `max_connections` per service pool.
+`shared_buffers` sized per workload (checkout 512 MB, analytics 256 MB, inventory 128 MB), `max_connections` per service pool.
 
-**Rationale**: FR-007/FR-008 require "unreachable by network position or credentials".
+**Rationale**: FR-007/FR-008 require "unreachable by network position, credentials or file access".
 Separate instances mean a compromised or buggy service cannot read another's data, and a
 database restart affects one service only.
 
-**Alternatives**: One server with four databases (shared failure domain, spec Clarifications
-reject it); separate schemas in one database (convention only).
+A file is enough for Catalog because its data is read-only after seeding, has one reader and about 2000 rows. A
+database there would add a container, a connection pool and a startup dependency for no benefit.
+
+**Alternatives**: One server with separate databases (shared failure domain, spec Clarifications
+reject it); separate schemas in one database (convention only); a Postgres instance for Catalog
+(rejected above); SQLite file (adds a dependency to read a table that is loaded whole into memory).
 
 ## R9. Seeding and schema creation per service
 
 **Decision**: Each service owns `seed.py` run by a one-shot compose job against its own database
-(`seed-catalog`, `seed-checkout`, `seed-inventory`, `seed-analytics`) using that service's role.
-Catalog seeds items; Inventory seeds stock for the same deterministic SKU list
+(`seed-catalog`, `seed-checkout`, `seed-inventory`, `seed-analytics`) using that service's role (Catalog's job has the volume instead).
+Catalog writes `catalog.csv` (atomically: temp file, then rename); Inventory seeds stock for the same deterministic SKU list
 (`SKU-%06d`, count from `CATALOG_SIZE`, quantity from `STOCK_PER_ITEM`, price/name formulas stay
-in Catalog); Checkout and Analytics create empty schemas. `--if-empty` semantics from 005 are
+in Catalog); Checkout and Analytics create empty schemas. Catalog's `--if-empty` means "file absent or empty". `--if-empty` semantics from 005 are
 kept. No cross-database foreign keys exist.
 
 **Rationale**: FR-010. The SKU naming formula is a shared *convention*, not shared data
@@ -170,7 +177,7 @@ Analytics scan count equals Checkout's.
 **Rationale**: Keeps FR-008 literal: the checker is not a back door into any database. Also tests
 that each service can describe its own data.
 
-**Alternatives**: A tool holding credentials for all four databases (convenient, but breaks the
+**Alternatives**: A tool holding credentials for all three databases (convenient, but breaks the
 boundary it is checking).
 
 ## R11. Gateway: stays nginx, adds request id and hides internal routes
@@ -200,7 +207,7 @@ problem needs.
 ## R13. Test strategy
 
 **Decision**: (a) Existing contract/integration tests keep their assertions. Fixtures change:
-four test databases, each service's engine bound to its own URL, and a mesh transport that
+three test databases, a temporary catalog file (`CATALOG_FILE`), each database service's engine bound to its own URL, and a mesh transport that
 routes inter-service calls to in-process apps. Tests that inserted directly into the old shared
 tables (for example `test_popular_items`'s direct scan inserts) now insert into the owning
 service's own database through that service's session fixture, which is a fixture change, not an

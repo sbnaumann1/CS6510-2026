@@ -1,14 +1,20 @@
 # Data Model: Microservices Architecture
 
-Four independent schemas, one per service, each in its own PostgreSQL instance. **No foreign keys
+Three independent database schemas (Checkout, Inventory, Analytics), each in its own PostgreSQL instance, plus Catalog's read-only file. **No foreign keys
 cross a service boundary** and no table is readable by another service. Money is integer cents,
 timestamps are `TIMESTAMPTZ` (unchanged from 001).
 
-## 1. Catalog (`catalog-db`)
+## 1. Catalog (`catalog.csv`, no database)
 
-| Table | Columns | Notes |
+One UTF-8 CSV file with header `sku,name,price_cents` and one row per item, in ascending SKU order. Written once by `seed-catalog`, read-only afterwards, loaded into memory by Catalog at startup and served by `GET /items`.
+
+| Column | Type | Rule |
 | --- | --- | --- |
-| `catalog_item` | `sku` text PK, `name` text, `price_cents` int `> 0` | Seeded once, immutable during a run. Served by `GET /items` |
+| `sku` | text | Unique; the file's order is ascending SKU (the load client derives its popularity rank from response position) |
+| `name` | text | Non-empty |
+| `price_cents` | int | `> 0` (checked when the file is loaded; a bad row stops startup with a clear error) |
+
+The file lives on a volume mounted read-write into `seed-catalog` and **read-only** into `catalog`, and into nothing else.
 
 ## 2. Checkout (`checkout-db`)
 

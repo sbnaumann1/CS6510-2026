@@ -25,7 +25,7 @@ all take effect or are all undone. The external behavior the load client sees do
 
 | Microservice | Business function | Public endpoints it owns | Data it owns (private store) |
 | --- | --- | --- | --- |
-| **Catalog** | What can be sold, and at what price | `GET /items` | Item catalog (SKU, name, price) |
+| **Catalog** | What can be sold, and at what price | `GET /items` | Item catalog (SKU, name, price), held in a private read-only file |
 | **Checkout** | Running a customer's basket from start to payment | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | Transactions and their scanned items; the record of each multi-service completion in progress |
 | **Inventory** | Knowing how much of each item is on hand, and what needs restocking | `GET /inventory/low-stock` | Stock levels and low-stock alerts |
 | **Analytics** | Understanding customer buying behavior | `GET /analytics/popular-items` | Its own copy of scan history it needs, and popular-items snapshots |
@@ -57,6 +57,7 @@ Analytics receives scans as they happen, asynchronously and without blocking the
 - Q: Which coordination style? → A: Left open by the assignment. This spec requires the *outcomes* (all-or-nothing visible results, no lost or double-applied updates). The plan will choose orchestration or choreography and justify it.
 - Q: Is the external contract still frozen? → A: Yes. `spec.yaml` and the unmodified load client are unchanged.
 - Q: Does one shared database server with separate private schemas count as "its own data store"? → A: No. Each microservice gets its own separately running data store instance that is not reachable by any other microservice.
+- Q: Does every store have to be a database server? → A: No. Catalog's data is a fixed reference list that never changes after seeding, so its private store is a read-only file that only Catalog (and its seed step) can open. Checkout, Inventory and Analytics change data under load and keep database instances.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -198,8 +199,8 @@ and the invariant passes.
 
 **Database per service**
 
-- **FR-007**: Each microservice MUST own a separate data store instance, and no store MUST be shared by two microservices.
-- **FR-008**: A microservice MUST be able to access only its own data store. Other microservices' stores MUST be unreachable from it by network position or credentials, not merely by convention.
+- **FR-007**: Each microservice MUST own a separate private data store, and no store MUST be shared by two microservices. A store MUST be a separately running database instance where the data changes at runtime (Checkout, Inventory, Analytics). Catalog's fixed reference data MAY be a read-only file private to Catalog.
+- **FR-008**: A microservice MUST be able to access only its own data store. Other microservices' stores MUST be unreachable from it by network position, credentials or file access, not merely by convention.
 - **FR-009**: A microservice that needs another's data MUST obtain it through that microservice's public interface, never by reading its store. Any copy it keeps (for example, a price captured at scan time) MUST be treated as a snapshot, with its owner and source documented.
 - **FR-010**: Seeding MUST populate each store with only the data its microservice owns (catalog items for Catalog, initial stock for Inventory), as an operator step before the microservices serve traffic.
 
@@ -263,7 +264,7 @@ and the invariant passes.
 - **Coordination style** (decided in the plan, FR-018): completion is **orchestrated** by Checkout, because the flow has one owner and a fixed order. The scan feed to Analytics is **choreographed**, as events delivered by a relay with an idempotent receiver.
 - **Eventual consistency is acceptable for Analytics and low-stock reporting**, but not for stock levels or the receipt.
 - **Payment is simulated and always succeeds**, as in the contract, so there is no payment step to compensate.
-- **Container-per-service, one host**: "independently deployable" is met by separate images and separate compose entries, each microservice with its own data store container. Results are not directly comparable to native runs from weeks 1–4, and the README says so.
+- **Container-per-service, one host**: "independently deployable" is met by separate images and separate compose entries, each microservice with its own private store (a database container for Checkout, Inventory and Analytics, a read-only file volume for Catalog). Results are not directly comparable to native runs from weeks 1–4, and the README says so.
 - **Docker Desktop is installed** and sized for the stress run. The plan sets recommended CPU and memory.
 - **Service-to-service communication uses the microservices' own network interfaces** (synchronous calls and/or a messaging mechanism, to be chosen in planning). Using one is no longer forbidden, unlike spec 005.
 - **Reports location**: committed under the load client's reports directory in a subfolder for spec 007.

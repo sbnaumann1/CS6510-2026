@@ -14,7 +14,7 @@ description: "Task list for 007 microservices architecture"
 **Ground rules for every task**:
 - **Moving code**: when a task says "move" or "port", copy the 005 code and change only imports, table names and what the task names. Do not "improve" it. The 005 SQL statements are tuned (spec 006) and stay as they are.
 - **No shared data code**: a service never imports another service's package, and `checkout_web` never imports SQLAlchemy ([contracts/service-boundaries.md](./contracts/service-boundaries.md)).
-- **Per-service database URL**: each service's `config.py` reads `<OWN_NAME>_DATABASE_URL` first (for example `INVENTORY_DATABASE_URL`) and falls back to `DATABASE_URL`. Only the service's own name appears in its code. This lets four in-process test apps use four databases.
+- **Per-service database URL**: each database service's `config.py` reads `<OWN_NAME>_DATABASE_URL` first (for example `INVENTORY_DATABASE_URL`) and falls back to `DATABASE_URL`. Only the service's own name appears in its code. This lets three in-process test apps use three databases. **Catalog has no database**: its `config.py` reads `CATALOG_FILE` (default `/data/catalog.csv`), and it never imports SQLAlchemy or a database driver.
 - **Contract tests**: assertions in `tests/contract/` are not edited. Fixtures may change.
 - **Old code**: `packages/checkout_data/` stays in place as the reference until T048 deletes it. Do not import it from new code.
 
@@ -29,8 +29,11 @@ description: "Task list for 007 microservices architecture"
 
 **Purpose**: Each service becomes self-contained and installable, with no dependency on `checkout_data`.
 
-- [ ] T001 Create the empty module files for every new service module listed in [plan.md](./plan.md) Project Structure under `services/*/src/*_service/` (`config.py`, `db.py`, `models.py`, `repo.py`, `seed.py`, plus `reserve.py`, `saga.py`, `recovery.py`, `scan_relay.py`, `*_client.py`, `ingest.py` where listed). Each file contains only a module docstring naming its purpose.
-- [ ] T002 [P] Update the four service manifests `services/{catalog,checkout,inventory,analytics}/pyproject.toml`. Bump `version` to `0.7.0`. Replace the `checkout-data` dependency with `sqlalchemy[asyncio]==2.0.23`, `greenlet>=3.0.0`, `asyncpg==0.29.0`, `psycopg2-binary==2.9.9`, `python-dotenv==1.0.0`, and `httpx` pinned to the version already in `uv.lock`. Keep `checkout-web` (now `==0.7.0`) and `orjson==3.9.10`. Catalog and Analytics need httpx only if they call a peer (Analytics, Inventory, Checkout do; Catalog does not).
+- [ ] T001 Create the empty module files for every new service module listed in [plan.md](./plan.md) Project Structure under `services/*/src/*_service/`: `config.py`, `db.py`, `models.py`, `repo.py`, `seed.py` for Checkout, Inventory and Analytics, plus `reserve.py`, `saga.py`, `recovery.py`, `scan_relay.py`, `*_client.py`, `ingest.py` where listed; for Catalog only `config.py`, `store.py` and `seed.py`. Each file contains only a module docstring naming its purpose.
+- [ ] T002 [P] Update the four service manifests `services/{catalog,checkout,inventory,analytics}/pyproject.toml`. Bump `version` to `0.7.0`. Replace the `checkout-data` dependency as follows:
+  - **checkout, inventory, analytics**: `sqlalchemy[asyncio]==2.0.23`, `greenlet>=3.0.0`, `asyncpg==0.29.0`, `psycopg2-binary==2.9.9`, `python-dotenv==1.0.0`, and `httpx` pinned to the version already in `uv.lock`.
+  - **catalog**: no database libraries and no httpx (it calls no peer); only `checkout-web` and `orjson`.
+  - All four keep `checkout-web==0.7.0` and `orjson==3.9.10`.
 - [ ] T003 [P] Bump `packages/checkout_web/pyproject.toml` to `version = "0.7.0"` and add `httpx` (same pin as T002).
 - [ ] T004 Update the root `pyproject.toml` workspace: remove `checkout-data` from `project.dependencies` and `[tool.uv.sources]` (the directory stays until T048 but is no longer a workspace dependency of anything except itself). Run `uv lock && uv sync`, then confirm `uv run python -c "import checkout_web, catalog_service, checkout_service, inventory_service, analytics_service"` succeeds.
 
@@ -48,22 +51,22 @@ description: "Task list for 007 microservices architecture"
 - [ ] T007 [P] Add request-id support in `packages/checkout_web/src/checkout_web/request.py` (extend the existing file): a `contextvars` holder, an ASGI middleware that reads `X-Request-ID` or generates one, sets the holder and echoes the header on the response, and a `log_step(log, *, step, tx=None, outcome, elapsed_ms=None, **extra)` helper that writes one JSON log line with `request_id`, `service`, `step`, `tx`, `outcome`, `elapsed_ms` ([research R12](./research.md)). Register the middleware in `checkout_web/app.py` `create_service_app`.
 - [ ] T008 Add `UpstreamUnavailable` to `packages/checkout_web/src/checkout_web/errors.py` with a handler returning `503` and the contract body `{"error": "INTERNAL_ERROR", "message": "<peer> service is unavailable."}`. Add a unit test `tests/unit/test_client.py` covering: success, timeout then retry then success, retries exhausted raises `UpstreamUnavailable`, non-idempotent call is never retried, and `X-Request-ID` is forwarded.
 - [ ] T009 [P] Write `config.py` for each service (`services/<svc>/src/<svc>_service/config.py`), a frozen dataclass settings object following the shape of `packages/checkout_data/src/checkout_data/config.py` but containing only that service's settings:
-  - **catalog**: `database_url`, `catalog_size`, `db_pool_size`, `workers`.
-  - **checkout**: `database_url`, `catalog_url`, `inventory_url`, `analytics_url`, `tx_abandon_minutes`, `recovery_lease_s=10`, `recovery_interval_s=2`, `reserve_budget_s=4`, `low_stock_threshold` is **not** here (Inventory owns it).
-  - **inventory**: `database_url`, `catalog_url`, `catalog_size`, `stock_per_item`, `low_stock_threshold=50`.
-  - **analytics**: `database_url`, `catalog_url`, `popular_window_size=1000`, `popular_slide_interval=500`, `popular_poll_ms=100`, `popular_gap_grace_ms=1000`.
-  - Each reads `<OWN_NAME>_DATABASE_URL` then `DATABASE_URL` (ground rules).
+  - **catalog**: `catalog_file` (`CATALOG_FILE`, default `/data/catalog.csv`), `catalog_size` (seed only), `workers`. No database settings.
+  - **checkout**: `database_url`, `catalog_url`, `inventory_url`, `analytics_url`, `tx_abandon_minutes`, `recovery_lease_s=10`, `recovery_interval_s=2`, `reserve_budget_s=4`, `db_pool_size`, `workers`. `low_stock_threshold` is **not** here (Inventory owns it).
+  - **inventory**: `database_url`, `catalog_url`, `catalog_size`, `stock_per_item`, `low_stock_threshold=50`, `db_pool_size`, `workers`.
+  - **analytics**: `database_url`, `catalog_url`, `popular_window_size=1000`, `popular_slide_interval=500`, `popular_poll_ms=100`, `popular_gap_grace_ms=1000`, `db_pool_size`, `workers`.
+  - The database services read `<OWN_NAME>_DATABASE_URL` then `DATABASE_URL` (ground rules).
 - [ ] T010 Rewrite `tests/_dispatch.py`:
   - Keep `ROUTES` and `route()`, add `("prefix", "/internal/", "blocked")` and make the dispatcher answer `404 {"error":"NOT_FOUND","message":"Not found."}` for it ([contracts/gateway-routes.md](./contracts/gateway-routes.md)).
   - Add `MeshTransport(httpx.AsyncBaseTransport)` that routes by hostname (`catalog`, `inventory`, `analytics`, `checkout`) straight to each service's ASGI app (no blocking of `/internal/`, since the mesh is private).
   - Add fault hooks: `mesh.fail(target, path_prefix, *, times=1, mode="error"|"timeout"|"drop_response", after=0)` and `mesh.calls` (a recorded list of `(target, method, path)`), so failure tests can assert call counts. `drop_response` performs the call, then raises a timeout (lost acknowledgement).
-- [ ] T011 Rewrite `tests/conftest.py` for four databases:
-  - Create `checkout_catalog_test`, `checkout_checkout_test`, `checkout_inventory_test`, `checkout_analytics_test` (names must end in `_test`; keep the safety check). Set `CATALOG_DATABASE_URL`, `CHECKOUT_DATABASE_URL`, `INVENTORY_DATABASE_URL`, `ANALYTICS_DATABASE_URL` before importing any service.
-  - Per-service fixtures `catalog_session`, `checkout_session`, `inventory_session`, `analytics_session` (each from that service's own `db.py`).
-  - `reset_db` runs each service's `seed.py --reset` against its own database (T014–T017) and clears each in-memory catalog cache.
+- [ ] T011 Rewrite `tests/conftest.py` for three databases and a catalog file:
+  - Create `checkout_checkout_test`, `checkout_inventory_test`, `checkout_analytics_test` (names must end in `_test`; keep the safety check). Set `CHECKOUT_DATABASE_URL`, `INVENTORY_DATABASE_URL`, `ANALYTICS_DATABASE_URL` before importing any service. Set `CATALOG_FILE` to a path under a session-scoped temporary directory.
+  - Per-service fixtures `checkout_session`, `inventory_session`, `analytics_session` (each from that service's own `db.py`). There is no catalog session.
+  - `reset_db` runs each service's `seed.py --reset` (T014, T020, T025, T035) and clears each in-memory catalog cache. For Catalog it rewrites the temporary file and reloads its store.
   - The `client` fixture builds the gateway twin plus the mesh and gives every service client the `MeshTransport`. Expose a `mesh` fixture for fault injection.
   - Keep `GATEWAY_URL` mode (same tests over real HTTP).
-  - Keep the per-test `engine.dispose()` fixture, once per service engine.
+  - Keep the per-test `engine.dispose()` fixture, once per database service engine.
 
 **Checkpoint**: shared pieces and harness exist; nothing is wired yet.
 
@@ -71,17 +74,15 @@ description: "Task list for 007 microservices architecture"
 
 ## Phase 3: User Story 1 — Unchanged checkout experience on microservices (Priority: P1) 🎯 MVP
 
-**Goal**: The existing contract and integration tests pass against four services with four databases, through the gateway twin.
+**Goal**: The existing contract and integration tests pass against four services (three databases and one catalog file), through the gateway twin.
 
 **Independent Test**: `uv run pytest tests/contract tests/integration` passes (assertions unchanged) with `tests/failure` not yet present.
 
 ### Catalog
 
-- [ ] T012 [P] [US1] Create `services/catalog/src/catalog_service/db.py` (async engine from `config.database_url`, `SessionLocal`, `get_session`, `ping`, `dispose_engine`, ported from `packages/checkout_data/src/checkout_data/__init__.py` without the autocommit sessions unless Catalog needs them) and `models.py` with `Base` and `CatalogItem` (`sku` text PK, `name` text not null, `price_cents` int not null, `CheckConstraint("price_cents > 0", name="catalog_item_price_cents_check")`). No other table.
-- [ ] T013 [P] [US1] Create `services/catalog/src/catalog_service/repo.py` with `load_catalog(session)` returning `(sku, name, price_cents)` in ascending SKU order (port of `checkout_data/repos/catalog.py`). Update `api.py` and `main.py` to use the local modules; the `/items` body and pre-rendering are unchanged ([research R6](./research.md) keeps `GET /items` as the one catalog read API).
-- [ ] T014 [US1] Create `services/catalog/src/catalog_service/seed.py` (`--reset`, `--if-empty`, default) that creates the Catalog schema and seeds `CATALOG_SIZE` items with name `Item {i}` and price from `catalog_price_cents(i)` (copy the function from `checkout_data/money.py`). Mirror the CLI behaviour documented in `checkout_data/seed.py` but touch only `catalog_item`.
-
-### Inventory
+- [ ] T012 [P] [US1] Create `services/catalog/src/catalog_service/store.py`, Catalog's whole data layer ([data-model.md](./data-model.md) §1). `load(path)` reads the CSV with the standard `csv` module and returns items as `(sku, name, price_cents)`, validating: header exactly `sku,name,price_cents`, `sku` unique and non-empty, `name` non-empty, `price_cents` an integer `> 0`, rows in ascending SKU order. Any violation raises an error naming the line, which stops startup. Hold the result in a module-level list. No SQLAlchemy, no database driver.
+- [ ] T013 [P] [US1] Update `services/catalog/src/catalog_service/api.py` and `main.py` to serve from `store.py`: load the file in the lifespan (fail startup if it is missing or invalid), probe = items loaded and count > 0, no engine, no `dispose_engine`. The `/items` body, its pre-rendering and the ascending-SKU order are unchanged from 005 ([research R6](./research.md) keeps `GET /items` as the one catalog read API).
+- [ ] T014 [US1] Create `services/catalog/src/catalog_service/seed.py` (`--reset`, `--if-empty`, default). It writes `CATALOG_SIZE` items to `CATALOG_FILE` with header `sku,name,price_cents`, SKU `SKU-{i:06d}`, name `Item {i}` and price from `catalog_price_cents(i)` (copy the function from `packages/checkout_data/src/checkout_data/money.py`). Write to a temporary file in the same directory, then rename it over the target so a reader never sees a partial file. `--if-empty` does nothing when the file exists and has at least one data row. Add `tests/unit/test_catalog_store.py`: round-trip with the seed, each validation failure above, and the atomic write.
 
 - [ ] T015 [P] [US1] Create `services/inventory/src/inventory_service/db.py` (as T012) and `models.py` with `Base` and these tables ([data-model.md](./data-model.md) §3):
   - `InventoryStock`: `sku` text PK, `current_stock` int not null, `initial_stock` int not null, `CheckConstraint("current_stock >= 0", name="inventory_stock_non_negative")`. No foreign key to any catalog table.
@@ -137,28 +138,28 @@ description: "Task list for 007 microservices architecture"
 - [ ] T038 [US1] Add `tests/integration/test_scan_relay.py`: relay delivers scans in order, resumes from the cursor after a restart, redelivery of a batch is counted once, an id that never commits is skipped after the grace period, and popular-items reflects the scans after `drain_relay`.
 - [ ] T039 [US1] Run `uv run pytest tests/contract tests/integration tests/unit` and fix failures in the new code until it all passes with the contract assertions unchanged (SC-001). Record the pass count in the commit message.
 
-**Checkpoint**: US1 complete. The unchanged contract suite passes on four services and four databases, in-process. This is the MVP.
+**Checkpoint**: US1 complete. The unchanged contract suite passes on four services (three databases and a catalog file), in-process. This is the MVP.
 
 ---
 
 ## Phase 4: User Story 2 — Each microservice owns its data and is its own deployable unit (Priority: P1)
 
-**Goal**: Four database containers on private networks, four independent images, and an automated boundary check that proves it.
+**Goal**: Three database containers on private networks, a read-only catalog volume, four independent images, and an automated boundary check that proves it.
 
-**Independent Test**: `uv run python scripts/check_boundaries.py` passes; `docker compose up -d --build --wait` brings up the topology; the isolation script shows no service can reach another's database.
+**Independent Test**: `uv run python scripts/check_boundaries.py` passes; `docker compose up -d --build --wait` brings up the topology; the isolation script shows no service can reach another's database and nothing but `catalog` can read the catalog file.
 
-- [ ] T040 [P] [US2] Rewrite the four `services/<svc>/Dockerfile`s: copy only `services/<svc>/requirements.lock`, `packages/checkout_web` and `services/<svc>`; no `packages/checkout_data`. Keep `UVICORN_HTTP=httptools` and the existing `CMD`. Each image also runs its own seed: `python -m <svc>_service.seed --if-empty` is the command compose overrides for the `seed-<svc>` job.
+- [ ] T040 [P] [US2] Rewrite the four `services/<svc>/Dockerfile`s: copy only `services/<svc>/requirements.lock`, `packages/checkout_web` and `services/<svc>`; no `packages/checkout_data`. Keep `UVICORN_HTTP=httptools` and the existing `CMD`. Each image also runs its own seed (Catalog's `seed-catalog` job writes `catalog.csv` to the volume and needs no database): `python -m <svc>_service.seed --if-empty` is the command compose overrides for the `seed-<svc>` job.
 - [ ] T041 [P] [US2] Create `tools/Dockerfile` and `tools/verify_invariant.py` placeholder wiring for the `checkout-tools` image (httpx only, installs `checkout_web`), replacing `packages/checkout_data/Dockerfile`. The tool itself is written in T053.
 - [ ] T042 [US2] Update `scripts/lock_services.sh` to export the four service locks only (drop the `checkout-data` export) and run it. Update `tests/unit/test_service_locks.py` so it asserts each lock is current and contains no other service's package (boundary rule 10).
-- [ ] T043 [US2] Rewrite `compose.yaml` per [contracts/compose-topology.md](./contracts/compose-topology.md): four `postgres:17` services (`catalog-db`, `checkout-db`, `inventory-db`, `analytics-db`) with their own role, password, tuning and `max_connections`; four `seed-<svc>` jobs; four services with only their own `DATABASE_URL` plus the peer URLs from the "Environment per service" table; the `edge`, `mesh` and four `*_data` networks exactly as specified; `tools` on `mesh` only; gateway unchanged apart from T059. No `depends_on` between services; each service depends only on its own seed job.
-- [ ] T044 [US2] Update `.env.example` with the per-database credentials (`CATALOG_DB_USER`, `CATALOG_DB_PASSWORD`, and the same for the other three) and rewrite `compose.test.yaml` as a test-stack override (small catalog, `*_test` databases, separate project name and image tags, as in 005).
+- [ ] T043 [US2] Rewrite `compose.yaml` per [contracts/compose-topology.md](./contracts/compose-topology.md): three `postgres:17` services (`checkout-db`, `inventory-db`, `analytics-db`) with their own role, password, tuning and `max_connections`; the `catalog_data` named volume mounted read-write into `seed-catalog` and **read-only** into `catalog`, and nowhere else; four `seed-<svc>` jobs; four services with only their own `DATABASE_URL` (Catalog gets `CATALOG_FILE` and no `DATABASE_URL`) plus the peer URLs from the "Environment per service" table; the `edge`, `mesh` and three `*_data` networks exactly as specified; `tools` on `mesh` only; gateway unchanged apart from T059. No `depends_on` between services; each service depends only on its own seed job.
+- [ ] T044 [US2] Update `.env.example` with the per-database credentials (`CHECKOUT_DB_USER`, `CHECKOUT_DB_PASSWORD`, and the same for Inventory and Analytics; Catalog has none) and rewrite `compose.test.yaml` as a test-stack override (small catalog, `*_test` databases, a separate `catalog_data` volume, separate project name and image tags, as in 005).
 - [ ] T045 [US2] Rewrite `scripts/check_boundaries.py` for the ten rules in [contracts/service-boundaries.md](./contracts/service-boundaries.md) (use `ast` and `re` only, plus `yaml` if already available, otherwise a small regex over `compose.yaml`; no new dependency). Rewrite `tests/unit/test_boundaries.py` with one passing case and one failing fixture per rule, in temporary directories.
-- [ ] T046 [P] [US2] Create `scripts/check_isolation.sh`: for each (service, foreign database host) pair, `docker compose exec <svc> python -c "socket.create_connection((host, 5432), 2)"` must fail; and each service must still connect to its own database. Prints one line per pair and exits non-zero on any reachable foreign database (FR-008, quickstart V4).
+- [ ] T046 [P] [US2] Create `scripts/check_isolation.sh`: for each (service, foreign database host) pair, `docker compose exec <svc> python -c "socket.create_connection((host, 5432), 2)"` must fail; each database service must still connect to its own database; and `docker compose exec catalog sh -c 'echo x >> /data/catalog.csv'` must fail while `docker compose exec checkout ls /data` must fail (no other service sees the volume). Prints one line per check and exits non-zero on any violation (FR-008, quickstart V4).
 - [ ] T047 [US2] Rewrite `scripts/check_independence.sh` for this architecture: rebuild and restart **one** service's image while the others keep running, and confirm the other three report the same container start time and stay healthy (FR-004, FR-006, spec US2 scenario 4).
 - [ ] T048 [US2] Delete `packages/checkout_data/` (including its Dockerfile, `requirements.lock`, `ownership.py`, `repos/`, `seed.py`, `verify_invariant.py`), remove `scripts/seed.py` and `scripts/verify_invariant.py` shims that import it (new shims arrive in T053), and remove any remaining references in `README.md`'s file tree. `grep -rn checkout_data .` outside `specs/` must return nothing (boundary rule 3).
-- [ ] T049 [US2] Bring up the stack and validate: `docker compose down -v && docker compose up -d --build --wait`; confirm four seeds exited 0 and all services plus the gateway are healthy; run `./scripts/check_isolation.sh`, `./scripts/check_independence.sh`, and `GATEWAY_URL=http://localhost:8080 uv run pytest tests/contract` (quickstart V4, V5). Fix what fails.
+- [ ] T049 [US2] Bring up the stack and validate: `docker compose down -v && docker compose up -d --build --wait`; confirm four seeds exited 0 (three database seeds and the catalog file seed) and all services plus the gateway are healthy; run `./scripts/check_isolation.sh`, `./scripts/check_independence.sh`, and `GATEWAY_URL=http://localhost:8080 uv run pytest tests/contract` (quickstart V4, V5). Fix what fails.
 
-**Checkpoint**: US1 and US2 both hold in the real stack. Four databases, private networks, contract tests green over HTTP.
+**Checkpoint**: US1 and US2 both hold in the real stack. Three databases and a read-only catalog volume on private stores, contract tests green over HTTP.
 
 ---
 
@@ -214,7 +215,7 @@ description: "Task list for 007 microservices architecture"
 
 - [ ] T066 [US5] Update `scripts/run_load_tests.sh`: default `REPORT_DIR` is `007-microservices-architecture`, and the post-run check calls `scripts/verify_invariant.py` (T053) instead of the old tool. Everything else (fresh `down -v`, exact assignment flags) is unchanged.
 - [ ] T067 [US5] Run `./scripts/run_load_tests.sh all` on a quiet machine with Docker Desktop at ≥ 8 CPUs and ≥ 8 GB. Confirm zero transport failures, only contract business errors, and invariant PASS after each run (SC-002). If the stress run fails the invariant or shows server errors, fix the cause (do not weaken the check) and rerun.
-- [ ] T068 [US5] Add a "Week 7 — microservices" section to `../load-client/reports/README.md`: table of the two reports (tx/s, items/s, COMPLETE error %, invariant), the machine and Docker settings, the 005 stress figure (191 tx/s from the 006 investigation) next to this run's, and the ratio. If the ratio is below 70 % (SC-009), add the measured cause (extra hop, extra commit, four databases) rather than a guess: capture it with a short run that times the saga steps from the `log_step` output.
+- [ ] T068 [US5] Add a "Week 7 — microservices" section to `../load-client/reports/README.md`: table of the two reports (tx/s, items/s, COMPLETE error %, invariant), the machine and Docker settings, the 005 stress figure (191 tx/s from the 006 investigation) next to this run's, and the ratio. If the ratio is below 70 % (SC-009), add the measured cause (extra hop, extra commit, three databases) rather than a guess: capture it with a short run that times the saga steps from the `log_step` output.
 - [ ] T069 [US5] Rewrite `README.md` for the microservices architecture (SC-010): services table with data stores, infrastructure and data-ownership diagrams, the completion-saga sequence diagram and compensation table (adapt [contracts/completion-saga.md](./contracts/completion-saga.md)), the scan-relay description, "what changed from 005", prerequisites, run and test commands (quickstart V1–V10), and the comparison note from T068. Remove the 005 shared-database sections.
 
 **Checkpoint**: All five stories delivered.
@@ -259,7 +260,7 @@ description: "Task list for 007 microservices architecture"
 ### Parallel example: User Story 1 data layers
 
 ```text
-Task: "T012 [US1] services/catalog/.../db.py + models.py"
+Task: "T012 [US1] services/catalog/.../store.py (catalog.csv loader)"
 Task: "T015 [US1] services/inventory/.../db.py + models.py"
 Task: "T021 [US1] services/analytics/.../db.py + models.py"
 Task: "T026 [US1] services/checkout/.../db.py + models.py"
@@ -275,7 +276,7 @@ Task: "T026 [US1] services/checkout/.../db.py + models.py"
 
 ### Incremental delivery
 
-1. US1 → in-process correctness on four databases.
+1. US1 → in-process correctness on three databases and a catalog file.
 2. US2 → real containers, private networks, boundary check.
 3. US3 → failure handling, recovery, invariant. This is the part the assignment grades hardest, so do not skip it for the reports.
 4. US4 → observability and outage drills.

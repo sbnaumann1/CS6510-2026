@@ -13,7 +13,7 @@ uv run python scripts/check_boundaries.py
 Expect: exit 0, all ten rules in [service-boundaries.md](./contracts/service-boundaries.md) pass.
 Covers FR-005, FR-007, FR-008, FR-022, SC-007.
 
-## V2. Contract and integration tests, in-process (four test databases)
+## V2. Contract and integration tests, in-process (three test databases and a temporary catalog file)
 
 ```bash
 uv run pytest tests/contract tests/integration tests/unit
@@ -41,7 +41,7 @@ docker compose up -d --build --wait
 docker compose ps
 ```
 
-Expect: four databases, four one-shot seeds `exited (0)`, four services and the gateway `healthy`.
+Expect: three databases, four one-shot seeds `exited (0)`, four services and the gateway `healthy`. `docker compose exec catalog sh -c 'echo x > /data/catalog.csv'` must fail (read-only volume).
 Then confirm isolation:
 
 ```bash
@@ -49,7 +49,7 @@ docker compose exec checkout python -c "import socket; socket.create_connection(
 ```
 
 Expect: fails (name does not resolve). Repeat for each service-to-foreign-database pair
-(FR-008).
+(FR-008). Catalog has no database to reach.
 
 ## V5. Contract tests over real HTTP
 
