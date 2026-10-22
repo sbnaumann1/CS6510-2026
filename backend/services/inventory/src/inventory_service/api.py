@@ -7,9 +7,9 @@ from fastapi.responses import ORJSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from checkout_web.request import positive_int_param
-from checkout_data.config import settings
-from checkout_data import get_session
 from inventory_service import low_stock as svc
+from inventory_service.config import settings
+from inventory_service.db import get_session
 
 router = APIRouter(tags=["inventory"])
 

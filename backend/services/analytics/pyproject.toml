@@ -1,16 +1,16 @@
 [project]
 name = "analytics-service"
-version = "0.5.0"
-description = "Analytics Service: popular-items streaming pipeline"
+version = "0.7.0"
+description = "Analytics Service: popular-items streaming pipeline (no database; in-memory, pulls from Checkout)"
 requires-python = ">=3.11"
 dependencies = [
-    "checkout-data==0.5.0",
-    "checkout-web==0.5.0",
+    "checkout-web==0.7.0",
+    "python-dotenv==1.0.0",
+    "httpx==0.25.2",
     "orjson==3.9.10",
 ]
 
 [tool.uv.sources]
-checkout-data = { workspace = true }
 checkout-web = { workspace = true }
 
 [build-system]

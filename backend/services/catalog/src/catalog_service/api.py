@@ -5,7 +5,7 @@ from __future__ import annotations
 import orjson
 from fastapi import APIRouter, Response
 
-from checkout_data.money import cents_to_amount
+from checkout_web.money import cents_to_amount
 
 router = APIRouter(tags=["catalog"])
 

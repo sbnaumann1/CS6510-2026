@@ -13,6 +13,7 @@ from fastapi.responses import ORJSONResponse
 
 from checkout_web.errors import register_error_handlers
 from checkout_web.health import health_router
+from checkout_web.request import RequestIdMiddleware
 
 
 def create_service_app(
@@ -28,6 +29,7 @@ def create_service_app(
         lifespan=lifespan,
     )
     register_error_handlers(app)
+    app.add_middleware(RequestIdMiddleware)
     for router in routers:
         app.include_router(router)
     app.include_router(health_router(name, probe))

@@ -1,14 +1,13 @@
 [project]
 name = "backend"
-version = "0.5.0"
-description = "Supermarket self-checkout system: domain services over a shared database (spec 005)"
+version = "0.7.0"
+description = "Supermarket self-checkout system: microservices, a private store per service (spec 007)"
 readme = "README.md"
 requires-python = ">=3.11"
 # The workspace root is not itself deployed: it installs every member so the
 # test suite and scripts can import all of them. Each service image installs
-# only its own member plus the two shared libraries (research R3).
+# only its own member plus checkout-web (research R3).
 dependencies = [
-    "checkout-data",
     "checkout-web",
     "catalog-service",
     "checkout-service",
@@ -23,7 +22,6 @@ package = false
 members = ["packages/*", "services/*"]
 
 [tool.uv.sources]
-checkout-data = { workspace = true }
 checkout-web = { workspace = true }
 catalog-service = { workspace = true }
 checkout-service = { workspace = true }

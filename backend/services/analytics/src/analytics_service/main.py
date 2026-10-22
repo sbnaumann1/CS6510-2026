@@ -1,9 +1,10 @@
 """Analytics Service: understanding customer buying behavior.
 
-Serves the popular-items window and runs the one persistent streaming pipeline
-that keeps it up to date (specs/005-service-architecture/research.md R5). The
-pipeline learns about scans only by tailing the shared scan record; nothing in
-Checkout knows this service exists.
+Serves the popular-items window and runs the one persistent streaming pipeline that
+keeps it up to date (specs/007-microservices-architecture/research.md R5). It has no
+database: the pipeline pulls scans from Checkout's scan log and keeps the window in
+memory, rebuilding it from Checkout after a restart. Nothing in Checkout knows this
+service exists.
 """
 
 from __future__ import annotations
@@ -15,9 +16,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from analytics_service import api
+from analytics_service import api, internal_reports
 from analytics_service.supervisor import PipelineSupervisor
-from checkout_data import SessionLocal, catalog, dispose_engine, ping
 from checkout_web.app import create_service_app
 
 log = logging.getLogger("analytics")
@@ -37,12 +37,6 @@ def _configure_logging() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _configure_logging()
-    # Item names in the ranking come from this process's own catalog copy.
-    async with SessionLocal() as session:
-        n = await catalog.load(session)
-    if n == 0:
-        log.warning("catalog is empty — run the seed (python -m checkout_data.seed)")
-
     supervisor = PipelineSupervisor()
     task = asyncio.create_task(supervisor.run(), name="pipeline-supervisor")
     try:
@@ -52,13 +46,11 @@ async def lifespan(app: FastAPI):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-        await dispose_engine()
 
 
 async def probe() -> None:
-    await ping()
-    if catalog.size() == 0:
-        raise RuntimeError("catalog cache is empty")
+    """Healthy as soon as the process is up. Analytics waits for Checkout on its own
+    and answers with the empty window meanwhile, so its health does not depend on it."""
 
 
-app = create_service_app("analytics", [api.router], probe, lifespan)
+app = create_service_app("analytics", [api.router, internal_reports.router], probe, lifespan)

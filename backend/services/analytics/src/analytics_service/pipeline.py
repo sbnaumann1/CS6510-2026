@@ -1,17 +1,19 @@
 """Persistent streaming pipeline for popular-items analytics.
 
-One pipeline runs for the life of the Analytics leader (specs/005-service-
-architecture/research.md R5). Five filters, connected by bounded queues, run
+One pipeline runs for the life of the Analytics process (specs/005-service-architecture/
+research.md R5, spec 007 research R5). Five filters, connected by bounded queues, run
 concurrently and keep their state across windows:
 
     TailIngest ─q1─▶ WindowFilter ─q2─▶ AggregationFilter ─q3─▶ RankingFilter ─slot─▶ OutputFilter
-    (DB tail)        (slide by id)      (running counts)        (top-200)              (latest-wins, commit)
+    (pull scans)     (slide by id)      (running counts)        (top-200)              (latest-wins, publish)
 
-TailIngest follows the shared scan record (`transaction_item.id` is the global scan
-sequence) as rows commit; nothing notifies it. The window is defined by scan id:
-it slides on each multiple of the slide interval, once TailIngest has accounted
-for every id at or below that boundary (R6). TERMINATE flows downstream only at
-shutdown, never between windows.
+TailIngest polls Checkout's scan log (`scan id` is the global scan sequence) as scans
+commit; nothing notifies it. The window is defined by scan id: it slides on each multiple
+of the slide interval, once TailIngest has accounted for every id at or below that
+boundary (R6). TERMINATE flows downstream only at shutdown, never between windows.
+
+Nothing is persisted: OutputFilter publishes into memory, and the pipeline is rebuilt from
+Checkout's scan log whenever it bootstraps.
 """
 
 from __future__ import annotations
@@ -21,15 +23,17 @@ import logging
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
-import orjson
-
-from checkout_data.config import settings
-from checkout_data.repos import analytics as analytics_repo
+from analytics_service.config import settings
+from analytics_service.scan_source import ScanSource
+from checkout_web.errors import UpstreamUnavailable
 
 log = logging.getLogger("analytics")
+
+# Back off this long when Checkout cannot be reached; the cursor is kept meanwhile.
+UNAVAILABLE_BACKOFF_S = 1.0
 
 WINDOW_SIZE = settings.popular_window_size
 SLIDE_INTERVAL = settings.popular_slide_interval
@@ -76,7 +80,7 @@ class WindowCounts:
 
 @dataclass(frozen=True)
 class RankedData:
-    """A ranked window, ready for persistence. computed_at None means DB now()."""
+    """A ranked window, ready to publish. computed_at None means "stamp it when published"."""
 
     window_size: int
     slide_interval: int
@@ -91,22 +95,28 @@ def first_boundary_after(start_after: int, slide: int) -> int:
     return (start_after // slide + 1) * slide
 
 
+class CursorAhead(Exception):
+    """Checkout's highest scan id is below this tail's cursor: its data was reset."""
+
+
 class TailIngest:
-    """Tails `transaction_item` from `start_after`, emitting ScanData in id order.
+    """Tails Checkout's scan log from `start_after`, emitting ScanData in id order.
 
     Keeps a contiguous watermark `last_id`: rows above a hole are held in
     `pending` until the hole fills. A hole that stays open longer than the grace
     period is declared a permanent gap (a sequence value that never committed),
     logged, and skipped. After each id it accepts, it emits Watermark(b) for
     every slide boundary b it has passed (R6).
+
+    `on_scan(scan_id, sku)` is called for each accepted scan and `on_advance(last_id)`
+    whenever the watermark moves, so the in-memory window and cursor follow the tail.
     """
 
     def __init__(
         self,
-        session_factory,
+        source: ScanSource,
         start_after: int,
         *,
-        repo=analytics_repo,
         first_boundary: int | None = None,
         slide: int = SLIDE_INTERVAL,
         batch: int = 1000,
@@ -114,9 +124,12 @@ class TailIngest:
         grace_s: float | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_scan: Callable[[int, str], None] | None = None,
+        on_advance: Callable[[int], None] | None = None,
     ):
-        self._session_factory = session_factory
-        self._repo = repo
+        self._source = source
+        self._on_scan = on_scan
+        self._on_advance = on_advance
         self._slide = slide
         self._batch = batch
         self._poll_s = settings.popular_poll_ms / 1000 if poll_s is None else poll_s
@@ -134,6 +147,8 @@ class TailIngest:
 
     async def _advance(self, scan_id: int, out: asyncio.Queue) -> None:
         self.last_id = scan_id
+        if self._on_advance is not None:
+            self._on_advance(scan_id)
         while self.next_boundary <= self.last_id:
             await out.put(Watermark(self.next_boundary))
             self.next_boundary += self._slide
@@ -142,6 +157,8 @@ class TailIngest:
         """Emit pending rows contiguous with last_id. True if any were emitted."""
         progressed = False
         while (sku := self.pending.pop(self.last_id + 1, None)) is not None:
+            if self._on_scan is not None:
+                self._on_scan(self.last_id + 1, sku)
             await out.put(ScanData(self.last_id + 1, sku))
             await self._advance(self.last_id + 1, out)
             progressed = True
@@ -167,11 +184,20 @@ class TailIngest:
 
     async def run(self, out: asyncio.Queue) -> None:
         while True:
-            async with self._session_factory() as session:
-                rows = await self._repo.get_scans_after(session, self.last_id, self._batch)
+            try:
+                rows, max_scan_id = await self._source.read(self.last_id, self._batch)
+            except UpstreamUnavailable as exc:
+                # Checkout is down or slow. Keep the cursor and the last ranking.
+                log.warning("scan source unavailable: %s", exc)
+                await self._sleep(UNAVAILABLE_BACKOFF_S)
+                continue
+            if max_scan_id < self.last_id:
+                raise CursorAhead(
+                    f"checkout's highest scan id {max_scan_id} is below the cursor {self.last_id}"
+                )
             for row in rows:
-                if row.id > self.last_id:
-                    self.pending[row.id] = row.sku
+                if row.scan_id > self.last_id:
+                    self.pending[row.scan_id] = row.sku
 
             progressed = await self._drain(out)
             if progressed:
@@ -289,11 +315,13 @@ class LatestSlot:
 
 
 class OutputFilter:
-    """Persists each ranked window (upsert + commit), newest first, never older."""
+    """Publishes each ranked window into memory, newest first, never older.
 
-    def __init__(self, session_factory, *, repo=analytics_repo, on_publish: Callable[[RankedData], None] | None = None):
-        self._session_factory = session_factory
-        self._repo = repo
+    `on_publish` receives the window (stamped with its computed-at time) and is what
+    makes it visible to the read path.
+    """
+
+    def __init__(self, *, on_publish: Callable[[RankedData], None] | None = None):
         self._on_publish = on_publish
         self.last_written_end = 0
 
@@ -304,17 +332,15 @@ class OutputFilter:
                 return
             if data.window_end <= self.last_written_end:
                 continue
-            async with self._session_factory() as session:
-                await self._repo.upsert_snapshot(
-                    session,
-                    data.window_size,
-                    data.slide_interval,
-                    data.window_start,
-                    data.window_end,
-                    orjson.dumps(data.ranking).decode(),
-                    data.computed_at,
+            if data.computed_at is None:
+                data = RankedData(
+                    window_size=data.window_size,
+                    slide_interval=data.slide_interval,
+                    window_start=data.window_start,
+                    window_end=data.window_end,
+                    computed_at=datetime.now(timezone.utc),
+                    ranking=data.ranking,
                 )
-                await session.commit()
             self.last_written_end = data.window_end
             log.info("window published start=%d end=%d", data.window_start, data.window_end)
             if self._on_publish is not None:

@@ -1,14 +1,17 @@
-"""Owns the one persistent pipeline: leadership, bootstrap, restart, shutdown.
+"""Owns the one persistent pipeline: bootstrap, restart, shutdown.
 
-Lifecycle (specs/005-service-architecture/data-model.md §3):
-  standby       — retry the leader lock every 2 s until this process holds it
-  bootstrapping — tail from b0 - window so the first window published is complete
+Lifecycle (specs/007-microservices-architecture/data-model.md §4):
+  bootstrapping — read Checkout's highest scan id, tail from b0 - window so the first
+                  window published is complete
   streaming     — five filters run until shutdown; windows are published as they slide
-  restarting    — any filter error: cancel all filters, back off 1 s, bootstrap again
+  restarting    — any filter error, or Checkout's data being reset: cancel all filters,
+                  back off 1 s, bootstrap again
 
-The lock is a session-level advisory lock on a dedicated connection held for the
-leader's whole lifetime, so at most one pipeline runs across all Analytics
-replicas (spec FR-015); PostgreSQL releases it if the leader dies.
+There is no leader election. 005 used a database advisory lock so that replicas would not
+run duplicate pipelines writing one shared snapshot row; with state held in memory there
+is no shared write target, and exactly one instance runs. If Checkout is unreachable
+while bootstrapping, the supervisor retries every `backoff_s` and the endpoint answers
+with whatever was last published (or the empty window).
 """
 
 from __future__ import annotations
@@ -18,11 +21,13 @@ import contextlib
 import logging
 from typing import Callable
 
+from analytics_service import state
 from analytics_service.pipeline import (
     SLIDE_INTERVAL,
     TERMINATE,
     WINDOW_SIZE,
     AggregationFilter,
+    CursorAhead,
     LatestSlot,
     OutputFilter,
     RankedData,
@@ -30,86 +35,96 @@ from analytics_service.pipeline import (
     TailIngest,
     WindowFilter,
 )
-from checkout_data import (
-    POPULAR_RECOMPUTE_LOCK,
-    SessionLocal,
-    advisory_unlock,
-    engine,
-    try_advisory_lock,
-)
-from checkout_data.repos import analytics as repo
+from analytics_service.scan_source import ScanSource, default_source
+from checkout_web.errors import UpstreamUnavailable
 
 log = logging.getLogger("analytics")
+
+
+def _publish(data: RankedData) -> None:
+    state.latest = data
 
 
 class PipelineSupervisor:
     def __init__(
         self,
+        source: ScanSource | None = None,
         on_publish: Callable[[RankedData], None] | None = None,
         *,
-        retry_s: float = 2.0,
         backoff_s: float = 1.0,
         drain_s: float = 2.0,
+        poll_s: float | None = None,
+        grace_s: float | None = None,
     ):
+        self._source = source if source is not None else default_source()
         self._on_publish = on_publish
-        self._retry_s = retry_s
         self._backoff_s = backoff_s
         self._drain_s = drain_s
+        self._poll_s = poll_s
+        self._grace_s = grace_s
         self.instances = 0  # pipelines built; read by tests (one per bootstrap)
         self._tail_task: asyncio.Task | None = None
         self._q1: asyncio.Queue | None = None
         self._tasks: list[asyncio.Task] = []
 
     async def run(self) -> None:
-        async with engine.connect() as conn:
-            await self._acquire(conn)
-            try:
-                while True:
-                    try:
-                        await self._run_pipeline()
-                        return  # drained after stop()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        log.exception("pipeline restarting after error")
-                        await asyncio.sleep(self._backoff_s)
-            finally:
-                await self._cancel_filters()
-                with contextlib.suppress(Exception):
-                    await advisory_unlock(conn, POPULAR_RECOMPUTE_LOCK)
-                    await conn.commit()
-
-    async def _acquire(self, conn) -> None:
-        waiting = False
-        while True:
-            got = await try_advisory_lock(conn, POPULAR_RECOMPUTE_LOCK)
-            # The lock is session-level; commit so the connection does not sit
-            # idle in a transaction for the leader's whole lifetime.
-            await conn.commit()
-            if got:
-                return
-            if not waiting:
-                log.info("pipeline standby: another Analytics process is leader")
-                waiting = True
-            await asyncio.sleep(self._retry_s)
+        try:
+            while True:
+                try:
+                    await self._run_pipeline()
+                    return  # drained after stop()
+                except asyncio.CancelledError:
+                    raise
+                except UpstreamUnavailable as exc:
+                    log.warning("pipeline waiting for checkout: %s", exc)
+                    await asyncio.sleep(self._backoff_s)
+                except CursorAhead as exc:
+                    log.warning("checkout data was reset; starting over: %s", exc)
+                    state.reset()
+                    await asyncio.sleep(self._backoff_s)
+                except Exception:
+                    log.exception("pipeline restarting after error")
+                    await asyncio.sleep(self._backoff_s)
+        finally:
+            await self._cancel_filters()
 
     async def _run_pipeline(self) -> None:
-        async with SessionLocal() as session:
-            max_seq = await repo.max_scan_seq(session)
+        max_seq = await self._source.max_scan_id()
         b0 = max_seq - max_seq % SLIDE_INTERVAL
         start_after = max(0, b0 - WINDOW_SIZE)
         # The first window published is b0 itself (complete), never a half-filled
         # earlier boundary; below the first boundary the read path answers on demand.
         first_boundary = b0 if b0 > 0 else SLIDE_INTERVAL
 
+        # Rebuild the in-memory window from Checkout. The last published ranking is kept
+        # until the rebuilt pipeline publishes a newer one.
+        state.window.clear()
+        state.cursor = start_after
+
         self.instances += 1
         log.info("pipeline started bootstrap_from=%d", start_after)
+
+        def advance(last_id: int) -> None:
+            state.cursor = last_id
+
+        def publish(data: RankedData) -> None:
+            _publish(data)
+            if self._on_publish is not None:
+                self._on_publish(data)
 
         q1: asyncio.Queue = asyncio.Queue(maxsize=10000)
         q2: asyncio.Queue = asyncio.Queue(maxsize=64)
         q3: asyncio.Queue = asyncio.Queue(maxsize=64)
         slot = LatestSlot()
-        tail = TailIngest(SessionLocal, start_after, first_boundary=first_boundary)
+        tail = TailIngest(
+            self._source,
+            start_after,
+            first_boundary=first_boundary,
+            poll_s=self._poll_s,
+            grace_s=self._grace_s,
+            on_scan=state.window.append,
+            on_advance=advance,
+        )
 
         self._q1 = q1
         self._tail_task = asyncio.create_task(tail.run(q1), name="tail-ingest")
@@ -118,9 +133,7 @@ class PipelineSupervisor:
             asyncio.create_task(WindowFilter(start_after).run(q1, q2), name="window"),
             asyncio.create_task(AggregationFilter().run(q2, q3), name="aggregation"),
             asyncio.create_task(RankingFilter().run(q3, slot), name="ranking"),
-            asyncio.create_task(
-                OutputFilter(SessionLocal, on_publish=self._on_publish).run(slot), name="output"
-            ),
+            asyncio.create_task(OutputFilter(on_publish=publish).run(slot), name="output"),
         ]
         try:
             # The tail only ends by cancellation (stop()); the downstream filters

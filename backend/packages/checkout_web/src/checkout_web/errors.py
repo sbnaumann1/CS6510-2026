@@ -25,6 +25,15 @@ INSUFFICIENT_STOCK = ("INSUFFICIENT_STOCK", 409)
 INTERNAL_ERROR = ("INTERNAL_ERROR", 500)
 
 
+class UpstreamUnavailable(Exception):
+    """A peer service could not be reached, or kept failing, within its time budget."""
+
+    def __init__(self, peer: str, detail: str = "") -> None:
+        self.peer = peer
+        self.detail = detail
+        super().__init__(f"{peer} service is unavailable. {detail}".strip())
+
+
 class ApiError(Exception):
     """Raised anywhere in the stack; rendered as the ApiError body."""
 
@@ -42,6 +51,11 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> ORJSONResponse:
         return _body(exc.code, exc.message, exc.http_status)
+
+    @app.exception_handler(UpstreamUnavailable)
+    async def _upstream(_: Request, exc: UpstreamUnavailable) -> ORJSONResponse:
+        log.warning("upstream unavailable: %s", exc)
+        return _body(INTERNAL_ERROR[0], f"{exc.peer} service is unavailable.", 503)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError) -> ORJSONResponse:

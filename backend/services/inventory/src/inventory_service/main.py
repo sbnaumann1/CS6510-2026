@@ -1,6 +1,7 @@
-"""Inventory Service: reporting stock levels that need attention.
+"""Inventory Service: stock levels, reservations and low-stock alerts.
 
-Read-only over the stock and alert rows Checkout writes; never calls Checkout.
+Owns the stock table (spec 007: stock moved here from Checkout). Checkout reduces stock
+only by calling the reservation routes; Inventory never reads Checkout's data.
 """
 
 from __future__ import annotations
@@ -9,9 +10,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from checkout_data import dispose_engine, ping
 from checkout_web.app import create_service_app
-from inventory_service import api
+from inventory_service import api, internal_api, internal_reports
+from inventory_service.db import dispose_engine, ping
 
 
 @asynccontextmanager
@@ -22,4 +23,9 @@ async def lifespan(app: FastAPI):
         await dispose_engine()
 
 
-app = create_service_app("inventory", [api.router], ping, lifespan)
+app = create_service_app(
+    "inventory",
+    [api.router, internal_api.router, internal_reports.router],
+    ping,
+    lifespan,
+)

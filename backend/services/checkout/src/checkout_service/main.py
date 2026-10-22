@@ -1,7 +1,7 @@
 """Checkout Service: running a basket from start to payment.
 
-Owns transactions, scans, stock decrements and low-stock alert emission, plus
-the abandoned-transaction sweep.
+Owns transactions, scans and the completion saga, plus the abandoned-transaction sweep
+and the recovery loop. Stock is Inventory's: completing a basket reserves it there.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from checkout_data import SessionLocal, catalog, dispose_engine, ping
-from checkout_data.config import settings
-from checkout_service import api, sweeper
+from checkout_service import api, internal_api, internal_reports, recovery, sweeper
+from checkout_service.config import settings
+from checkout_service.db import dispose_engine, ping
 from checkout_web.app import create_service_app
 
 log = logging.getLogger("checkout")
@@ -23,20 +23,18 @@ log = logging.getLogger("checkout")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with SessionLocal() as session:
-        n = await catalog.load(session)
-    if n == 0:
-        log.warning("catalog is empty — run the seed (python -m checkout_data.seed)")
-    else:
-        log.info("catalog cache loaded: %d items", n)
-
-    sweep = asyncio.create_task(_sweep_loop())
+    tasks = [
+        asyncio.create_task(_sweep_loop(), name="sweeper"),
+        asyncio.create_task(recovery.recovery_loop(), name="recovery"),
+    ]
     try:
         yield
     finally:
-        sweep.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await sweep
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await dispose_engine()
 
 
@@ -54,10 +52,9 @@ async def _sweep_loop() -> None:
             log.exception("sweeper failed")
 
 
-async def probe() -> None:
-    await ping()
-    if catalog.size() == 0:
-        raise RuntimeError("catalog cache is empty")
-
-
-app = create_service_app("checkout", [api.router], probe, lifespan)
+app = create_service_app(
+    "checkout",
+    [api.router, internal_api.router, internal_reports.router],
+    ping,
+    lifespan,
+)
