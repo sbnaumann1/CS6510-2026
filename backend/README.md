@@ -1,33 +1,28 @@
-# Self-Checkout Backend — Domain Services over a Shared Database
+# Self-Checkout Backend — Microservices, a Private Store per Service
 
-Week 5 of the architecture series. The frozen contract in [`spec.yaml`](./spec.yaml) is now
-served by **four independently deployable domain services**, organized by business
-function. They all use **one centralized PostgreSQL database** and never call each other.
-An nginx **gateway** on `:8080` routes each request by path, so the unmodified Java load
-client in `../load-client/` still sees one base URL.
+Week 7 of the architecture series. The frozen contract in [`spec.yaml`](./spec.yaml) is served
+by **four independently deployable microservices**. Each one owns its data, and none can read
+another's: when one needs something that belongs to another, it asks that service's API. The one
+request that must change two services' data, completing a transaction, is coordinated as a
+**saga** with compensation. An nginx **gateway** on `:8080` routes each request by path, so the
+unmodified Java load client in `../load-client/` still sees one base URL.
 
-## Services defined
+## Microservices
 
-| Service | Business function | Endpoints it owns | Background work it owns |
+| Service | Business function | Endpoints it owns | Its private store |
 | --- | --- | --- | --- |
-| **Catalog Service** | What can be sold, and at what price | `GET /items` | — |
-| **Checkout Service** | Running a basket from start to payment | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | Abandoned-transaction sweep; low-stock alert emission, inside the completion transaction |
-| **Inventory Service** | Reporting stock that needs attention | `GET /inventory/low-stock` | — |
-| **Analytics Service** | Understanding buying behaviour | `GET /analytics/popular-items` | The persistent popular-items streaming pipeline |
+| **Catalog** | What can be sold, and at what price | `GET /items` | `catalog.csv`, a **read-only file** on a volume only Catalog (and its seed job) mounts |
+| **Checkout** | Running a basket from start to payment | `POST /transactions`, `POST /transactions/{id}/items`, `POST /transactions/{id}/complete`, `GET /transactions/{id}` | **`checkout-db`**: PostgreSQL 17 with transactions, scans, and the record of each completion in flight |
+| **Inventory** | How much is on hand, and what needs restocking | `GET /inventory/low-stock` | **`inventory-db`**: PostgreSQL 17 with stock, reservations and low-stock alerts |
+| **Analytics** | Understanding buying behaviour | `GET /analytics/popular-items` | **None.** A rolling window held in memory and rebuilt from Checkout's scans |
 
-Infrastructure, not domain services:
-- **gateway** (nginx; routing only)
-- **postgres** (the one shared database)
-- **seed** and **tools** (one-shot operator CLIs)
+Infrastructure, not services: the **gateway** (nginx, routing only), the **seed jobs** (one per
+store, run once before a service starts) and **tools** (the cross-store verification, on demand).
 
-Each domain service is its own deployable unit:
-- its own Python package (`services/<name>/`);
-- its own pinned dependency file (`requirements.lock`);
-- its own image (`services/<name>/Dockerfile`);
-- its own compose entry.
-
-It can be built, started, stopped or restarted alone, and when it's down only its own
-routes fail. Those failures come back as a `503` in the contract's error shape.
+Why the stores differ: Checkout's and Inventory's data changes under load and cannot be
+recomputed, so each is a separately running database on a network only it can reach. Catalog's
+data is a fixed list that never changes after seeding, so a file is enough. Analytics' data is
+derived from Checkout's scans, which are already durable there, so it needs nothing of its own.
 
 ### Infrastructure
 
@@ -37,159 +32,148 @@ flowchart LR
 
     subgraph stack["Docker Compose stack"]
         direction LR
-        gw["gateway<br/>nginx, port 8080<br/>routing only"]
+        gw["gateway<br/>nginx, port 8080<br/>routing only; /internal/ blocked"]
 
-        subgraph svcs["Domain services"]
+        subgraph svcs["Microservices (network: mesh)"]
             direction TB
-            cat["Catalog Service<br/>GET /items"]
-            chk["Checkout Service<br/>/transactions/..."]
-            inv["Inventory Service<br/>GET /inventory/low-stock"]
-            ana["Analytics Service<br/>GET /analytics/popular-items<br/>persistent pipeline"]
+            cat["Catalog<br/>GET /items"]
+            chk["Checkout<br/>/transactions/..."]
+            inv["Inventory<br/>GET /inventory/low-stock"]
+            ana["Analytics<br/>GET /analytics/popular-items<br/>one instance"]
         end
 
-        db[("PostgreSQL 17<br/>one shared database")]
-        seed["seed (one-shot)<br/>seeds an empty DB"]
-        tools["tools (on demand)<br/>verify_invariant"]
+        csv[("catalog.csv<br/>read-only volume")]
+        cdb[("checkout-db<br/>PostgreSQL 17")]
+        idb[("inventory-db<br/>PostgreSQL 17")]
+        seeds["seed-catalog, seed-checkout,<br/>seed-inventory (one-shot)"]
     end
 
     client -->|"HTTP"| gw
-    gw -->|"/items"| cat
-    gw -->|"/transactions*"| chk
-    gw -->|"/inventory/*"| inv
-    gw -->|"/analytics/*"| ana
-
-    chk ==>|"writes transaction, transaction_item,<br/>inventory_stock, low_stock_alert<br/>reads catalog_item"| db
-    ana ==>|"writes popular_window_snapshot"| db
-    cat -.->|"reads catalog_item"| db
-    inv -.->|"reads inventory_stock,<br/>low_stock_alert, catalog_item"| db
-    ana -.->|"tails transaction_item,<br/>reads catalog_item"| db
-    seed ==>|"schema + catalog + stock"| db
-    tools -.->|"invariant check"| db
+    gw --> cat
+    gw --> chk
+    gw --> inv
+    gw --> ana
+    cat -.->|"reads"| csv
+    chk ==>|"writes"| cdb
+    inv ==>|"writes"| idb
+    chk -->|"GET /items (snapshot)"| cat
+    inv -->|"GET /items (names)"| cat
+    ana -->|"GET /items (names)"| cat
+    chk -->|"reserve / release"| inv
+    ana -->|"GET /internal/scans"| chk
+    seeds ==>|"each seeds its own store"| csv
+    seeds ==> cdb
+    seeds ==> idb
 ```
-
 
 How to read it:
-- **Thick arrows** are writes. **Dotted arrows** are reads.
-- There are **no arrows between services**. Each service's only connection is to the shared
-  database, and the one place they meet is the table that one writes and another reads. For
-  example, Analytics tails the `transaction_item` rows Checkout inserts.
-- **Startup order** (compose `depends_on`): postgres becomes healthy, then `seed` runs to
-  completion, then the four services start and become healthy, then the gateway starts.
-- **Ports.** The gateway is published on `:8080`. Each service is also on `127.0.0.1:8081`–`8084`,
-  for debugging and the gateway-bypass check only. Postgres is on `127.0.0.1:5433`.
+- **Thick arrows** are writes to a store, **dotted** is a read of the file, **thin arrows** are HTTP calls between services (the `mesh` network).
+- Every store has **exactly one service** attached to it. `check_isolation.sh` proves, from inside the running containers, that no service can open another's database.
+- **Startup order**: each database healthy → its seed job completes → its service starts → the gateway starts. Services never wait for each other; peers are contacted lazily, so any one can start while another is down. Analytics depends on nothing.
+- **Ports**: the gateway is published on `:8080`. Each service is also on `127.0.0.1:8081`–`8084` (catalog, checkout, inventory, analytics) for debugging and the verification tool. The databases are on `127.0.0.1:5442` (checkout) and `:5443` (inventory).
 
-Full unit, port and health-check details:
-[`contracts/compose-topology.md`](./specs/005-service-architecture/contracts/compose-topology.md).
+Full unit, network, credential and port details:
+[`contracts/compose-topology.md`](./specs/007-microservices-architecture/contracts/compose-topology.md).
 
-<details>
-<summary>Plain-text version</summary>
+## Who may call whom
 
-```text
-host                     ┌──────────────────────── docker compose ────────────────────────┐
-                         │                                                                 │
-load client ──HTTP──▶ gateway :8080 ──/items──────────▶ Catalog ─────(reads)──────┐        │
-                         │   (nginx)  ──/transactions*──▶ Checkout ════(writes)════╡        │
-                         │            ──/inventory/*────▶ Inventory ────(reads)────┼──▶ PostgreSQL
-                         │            ──/analytics/*────▶ Analytics ═══(writes)════╡   (one shared DB)
-                         │                                  └─(tails transaction_item)┘     │
-                         │   seed (one-shot) ════════════════════════════════════════╡      │
-                         │   tools (on demand) ──────────────────────────────────────┘      │
-                         └─────────────────────────────────────────────────────────────────┘
-```
+| Caller | Callee | What for |
+| --- | --- | --- |
+| Checkout, Inventory, Analytics | Catalog | `GET /items`, cached in memory as a snapshot (prices for scans, names for reports) |
+| Checkout | Inventory | `POST /internal/reservations`, `DELETE /internal/reservations/{tx}?epoch=n` (the saga) |
+| Analytics | Checkout | `GET /internal/scans?after=n` (the scan log, by position) |
+| verification tool | Checkout, Inventory, Analytics | `GET /internal/reports/*` (read-only) |
 
-</details>
+`/internal/*` is served on the services' own port and is **blocked at the gateway**. Contracts:
+[`internal-apis.md`](./specs/007-microservices-architecture/contracts/internal-apis.md).
 
-## How the services share the database (and nothing else)
+[`scripts/check_boundaries.py`](./scripts/check_boundaries.py) enforces this as part of the test
+suite (eleven rules). It fails on:
+- a service importing another service's code, or the removed shared data library;
+- a database library in Catalog or Analytics, or in `checkout_web`;
+- SQL naming a table that isn't in that service's own models;
+- a raw HTTP client or socket in a service, or a call to a peer it may not call;
+- compose giving a service another's database, credentials or volume, or attaching a second service to a store's network;
+- the gateway proxying `/internal/`, or Analytics running more than one instance.
 
-The services' only coupling is the database, and the code for it is packaged deliberately:
+The only shared code is [`checkout_web`](./packages/checkout_web/): the contract's error shape,
+request parsing, the app factory, `/healthz`, money formatting, request ids and the service
+client. It knows no schema and imports no database library.
+
+## Completing a transaction: a saga
+
+Completion is the one request that changes two stores: Checkout (the transaction) and Inventory
+(the stock). No transaction spans two databases, so Checkout **orchestrates** a short saga, and
+every step is idempotent so any step can be repeated safely.
 
 ```mermaid
-flowchart TB
-    subgraph images["Service images"]
-        direction LR
-        cat["catalog_service"]
-        chk["checkout_service"]
-        inv["inventory_service"]
-        ana["analytics_service"]
-    end
+sequenceDiagram
+    autonumber
+    participant S as Shopper
+    participant C as Checkout (checkout-db)
+    participant I as Inventory (inventory-db)
 
-    subgraph data["checkout_data 0.5.0 (shared DB access)"]
-        direction LR
-        rcat["repos.catalog<br/>read-only, shared"]
-        rchk["repos.checkout"]
-        rinv["repos.inventory"]
-        rana["repos.analytics"]
-    end
-
-    web["checkout_web 0.5.0<br/>errors, request parsing,<br/>app factory, /healthz<br/>no DB access"]
-    own["ownership.TABLES<br/>owner + readers per table<br/>enforced on every repos module<br/>by scripts/check_boundaries.py"]
-    db[("PostgreSQL")]
-
-    cat --> rcat
-    chk --> rchk
-    chk --> rcat
-    inv --> rinv
-    ana --> rana
-    ana --> rcat
-    images --> web
-    data --> db
-    own -.- data
+    S->>C: POST /transactions/{id}/complete
+    Note over C: local tx: OPEN → COMPLETING,<br/>completion record RESERVING (epoch n)
+    C->>I: POST /internal/reservations (tx, epoch n, lines)
+    Note over I: one statement: lock stock rows in SKU order,<br/>check, decrement, alert, record APPLIED. COMMIT
+    I-->>C: 200 APPLIED
+    Note over C: local tx: COMPLETING → COMPLETED
+    C-->>S: 200 receipt
 ```
 
-Each service imports only its own repository module, plus the shared read-only catalog
-module. All SQL lives in `checkout_data`.
+The hot SKU's stock lock is held only inside Inventory, for one statement plus `COMMIT`
+(the spec 006 finding), and is released before Checkout finalizes.
 
-- **`checkout-data` 0.5.0** ([`packages/checkout_data/`](./packages/checkout_data/)) is the shared data-access library. It holds:
-  - the schema (ORM models);
-  - connection and session handling, and the advisory-lock helpers;
-  - the seed and invariant CLIs;
-  - **one repository module per consuming service**: `repos/catalog.py` (read-only, shared), `repos/checkout.py`, `repos/inventory.py` and `repos/analytics.py`. Every SQL statement in the system lives in one of these.
-- **`checkout_data.ownership.TABLES`** declares, for every table, its single writing owner and its readers:
+| What goes wrong | What the saga does | The shopper sees |
+| --- | --- | --- |
+| Stock is short | Nothing to undo; the transaction reopens | `409 INSUFFICIENT_STOCK` |
+| Inventory never answers (timeout, error, 5xx) | Retry the same reserve within a 4 s budget; then **release** and reopen | `503`, transaction still open, retry works |
+| The reserve landed but its reply was lost | The retry is recognised: stock is reduced once | `200` |
+| Checkout's own final step fails | **Release** the reservation, reopen | `503` |
+| The release cannot be delivered either | Left `COMPENSATING`; the shopper's next `complete` finishes it and starts a fresh attempt, or the recovery loop does | `503`, then works |
+| Checkout crashes mid-saga | The recovery loop (lease 10 s) rolls back an unconfirmed reserve, or finishes one that was recorded | after restart: `GET` shows `OPEN` or `COMPLETED` |
+| A second `complete` while one is running | Refused | `409 TRANSACTION_NOT_OPEN` (as in 005) |
+| Analytics is down | Nobody calls it during a scan or a completion | unaffected |
 
-  | Table | Owner | Readers |
-  | --- | --- | --- |
-  | `catalog_item` | catalog (seed only) | all four |
-  | `inventory_stock` | checkout | checkout, inventory |
-  | `transaction` | checkout | checkout |
-  | `transaction_item` | checkout | checkout, analytics |
-  | `low_stock_alert` | checkout | inventory |
-  | `popular_window_snapshot` | analytics | analytics |
-- **`checkout-web` 0.5.0** ([`packages/checkout_web/`](./packages/checkout_web/)) carries the contract's error shape, request parsing, the app factory and `/healthz`. It has no database access.
-- **Each image installs both libraries as regular packages**, so the shared code is distributed into every deployable unit. A schema change means bumping `checkout-data` and redeploying the services in that table's Readers column. That coupling is accepted and visible, not hidden.
+Each attempt has an **epoch**, and Inventory records one adjustment per `(transaction, epoch)`.
+A release leaves a record even when there was nothing to undo, so a reserve of the same attempt
+that arrives late is refused; a rolled-back transaction's next attempt is a new epoch and is not.
+Every step logs one JSON line with the request id; trace one request across the services with
+`./scripts/trace_request.sh <request-id>`.
 
-Where one business function needs another's data, it reads the shared database:
-- Checkout prices scans from `catalog_item`; it doesn't call Catalog.
-- Inventory reports from the stock and alert rows that Checkout writes.
-- Analytics tails the scan record Checkout writes. Nothing tells it a scan happened.
+Design: [`contracts/completion-saga.md`](./specs/007-microservices-architecture/contracts/completion-saga.md),
+[research R1–R4](./specs/007-microservices-architecture/research.md).
 
-[`scripts/check_boundaries.py`](./scripts/check_boundaries.py) enforces all of this as part of
-the test suite. It fails on:
-- a service importing another service's code;
-- any network client in a service;
-- SQL outside `checkout_data`;
-- a repository writing a table it doesn't own, or reading one it isn't a declared reader of;
-- a compose environment naming another service's host.
-
-Contract: [`specs/005-service-architecture/contracts/service-boundaries.md`](./specs/005-service-architecture/contracts/service-boundaries.md).
-
-## Analytics: one persistent streaming pipeline
+## Analytics: an in-memory pipeline that pulls from Checkout
 
 ```text
 TailIngest ─q1─▶ WindowFilter ─q2─▶ AggregationFilter ─q3─▶ RankingFilter ─slot─▶ OutputFilter
- (DB tail)       (slide by id)      (running counts)        (top-200)              (latest-wins, commit)
+ (pull scans)    (slide by id)      (running counts)        (top-200)              (latest-wins, publish)
 ```
 
-The Analytics Service runs one pipeline for its whole life. There is no new run per 500
-scans.
-- **TailIngest** follows `transaction_item` as rows commit. It keeps a contiguous watermark, so scans that commit out of order are never skipped, and an id that never commits is skipped after 1 s.
-- **WindowFilter** slides the 1 000-scan window by scan id every 500.
-- **AggregationFilter** keeps a running per-SKU count.
-- **RankingFilter** breaks ties by SKU.
-- **OutputFilter** commits each window. If several are ready at once, it writes only the newest.
-- **A supervisor** holds a PostgreSQL advisory lock, so only one pipeline runs across replicas. It rebuilds the window from the database on start, so a restarted Analytics catches up on scans made while it was down.
+One pipeline runs for the life of the process, as in 005, but its source and its output changed.
+- **TailIngest** polls Checkout's `GET /internal/scans?after=<id>` every 100 ms. It keeps a contiguous watermark, so scans that commit out of order are never skipped, and an id that never commits is skipped after 1 s.
+- **Output** is published into memory. The window, counts and ranking live in memory and are never written anywhere.
+- **Restart**: Analytics reads Checkout's highest scan id, computes the last 500-scan boundary and rebuilds the last 1 000 scans. Catching up after any downtime costs about 1 000 rows.
+- **No leader election.** 005 needed a database lock so replicas would not fight over one snapshot row. With nothing shared to write, a second instance would only duplicate work, and compose runs exactly one.
+- **Checkout is down**: Analytics keeps serving its last ranking and resumes when Checkout returns. **Analytics restarts while Checkout is down**: it answers with the empty window (not an error) until Checkout is back.
+- **Checkout's data is reset**: Checkout names its scan log (`logId`); if it changes, Analytics starts over, even if the new log has reached the old position.
 
-Design: [research R5–R6](./specs/005-service-architecture/research.md) and
-[data-model §3](./specs/005-service-architecture/data-model.md).
+Design: [research R5](./specs/007-microservices-architecture/research.md) and
+[data-model §4](./specs/007-microservices-architecture/data-model.md).
+
+## What changed from Week 5
+
+| | Week 5 (005) | Week 7 (007) |
+| --- | --- | --- |
+| Data | one PostgreSQL shared by all four | a private store per service; no service can reach another's |
+| Shared code | `checkout-data`: schema, repositories, seeds (the deliberate coupling) | gone; only `checkout-web`, which knows no schema |
+| Needing another's data | read the shared tables | call its API, keep a snapshot |
+| Stock | Checkout's, in the shared database | Inventory's; Checkout reserves it |
+| Completion | one database transaction | an orchestrated saga with compensation, retries and a recovery loop |
+| Analytics | tails a table, publishes to a snapshot row, leader lock | pulls Checkout's scan log, in memory, no lock |
+| Failure of one service | its routes fail | its routes fail, dependants fail cleanly or heal later |
 
 ## Prerequisites
 
@@ -200,102 +184,102 @@ Design: [research R5–R6](./specs/005-service-architecture/research.md) and
 ## Run
 
 ```bash
-docker compose up -d --build --wait     # build, seed an empty DB, start everything; blocks until healthy
+docker compose up -d --build --wait     # build, seed each store, start everything; blocks until healthy
 curl -s localhost:8080/items | head -c 120
-docker compose ps                       # postgres, catalog, checkout, inventory, analytics, gateway: healthy
-docker compose down -v                  # tear down, including database data
+docker compose ps                       # 2 databases, 3 seeds (exited), 4 services, gateway: healthy
+docker compose down -v                  # tear down, including every store
 ```
 
 One service at a time:
 
 ```bash
-docker compose stop analytics           # only /analytics/popular-items is affected (JSON 503)
-docker compose start analytics          # it rebuilds its window from the database
-docker compose up -d --build --no-deps analytics   # rebuild and redeploy just this one
+docker compose stop inventory           # completions answer 503 (and stay retryable); low-stock answers 503; the rest work
+docker compose start inventory
+docker compose up -d --build --no-deps --force-recreate analytics   # rebuild and redeploy just this one
 ```
 
-`seed` runs `python -m checkout_data.seed --if-empty`, so it seeds only an empty database. A
-fresh run therefore always starts with `docker compose down -v`.
+Each seed job runs `--if-empty`, so it seeds only an empty store. A fresh run therefore always
+starts with `docker compose down -v`.
 
 ## Test
 
 ```bash
 uv sync
-uv run pytest -q                        # all four service apps in-process behind the gateway's route table
+uv run pytest -q                        # all four services in-process, with fault injection between them
 uv run python scripts/check_boundaries.py
-./scripts/check_independence.sh         # needs the stack up: stop/restart each service, check the rest keep working
+./scripts/check_isolation.sh            # needs the stack up: no service can reach another's store
+./scripts/check_independence.sh         # needs the stack up: recreate, then stop, each service in turn
+./scripts/check_crash_recovery.sh       # needs the stack up: kill Checkout under load; the stores must agree
 ```
+
+The suites in `tests/`:
+- `contract/`: the frozen contract, unchanged from earlier weeks.
+- `integration/`: the stores, Analytics' pull, request ids, timeouts, the verification tool.
+- `failure/`: every outcome of the saga (a failure injected at each step, a crash at each point), idempotency, Analytics faults, and many baskets racing for the hot SKU. After each, the stores must agree.
+- `unit/`: filters, window, client, catalog file, settings, routes, boundaries.
+
+The in-process suite uses two native databases, `checkout_checkout_test` and
+`checkout_inventory_test` (names must end in `_test` or it refuses to start), a temporary catalog
+file, and an in-process stand-in for the network that can drop, delay or fail chosen calls.
 
 The same contract tests over real HTTP, through the gateway and the containers:
 
 ```bash
 docker compose -f compose.yaml -f compose.test.yaml up -d --build --wait
-GATEWAY_URL=http://localhost:8080 \
-TEST_DATABASE_URL=postgresql+asyncpg://checkout:checkout@127.0.0.1:5433/checkout_test \
-  uv run pytest -q tests/contract
+GATEWAY_URL=http://localhost:8080 uv run pytest -q tests/contract
 docker compose -f compose.yaml -f compose.test.yaml down -v
 ```
-
-The in-process suite runs against its own `checkout_test` database on the native
-PostgreSQL. Its name must end in `_test` or the suite refuses to start.
-`tests/unit/test_gateway_routes.py` checks that the test dispatcher's route table and
-`gateway/nginx.conf` are identical.
 
 ## Measure
 
 ```bash
 ./scripts/run_load_tests.sh             # default run, then stress; fresh stack for each
 ./scripts/run_load_tests.sh stress      # or: default
-docker compose run --rm tools python -m checkout_data.verify_invariant   # the graded correctness check
+docker compose --profile tools run --rm --build tools   # the graded correctness check, across all stores
+python scripts/step_timings.py logs/compose-stress.log  # where a completion's time goes, by step
 ```
 
-Each run does a fresh `down -v` and `up --wait`, then runs the load client with exactly
-the assignment's flags (`./run.sh`, and `./run.sh --stations=100 --duration=120`). It moves
-the report into `../load-client/reports/005-service-architecture/`, saves the compose logs to
+Each run does a fresh `down -v` and `up --wait`, then runs the load client with exactly the
+assignment's flags (`./run.sh`, and `./run.sh --stations=100 --duration=120`). It moves the
+report into `../load-client/reports/007-microservices-architecture/`, saves the compose logs to
 `logs/`, verifies the invariant, and leaves the last stack up for inspection.
 
-### Graded reports (2026-10-13)
+The check opens no database: each service describes its own data over `/internal/reports/*`,
+and the tool verifies that `initial_stock − current_stock` equals the completed line items, per
+SKU; no stock is negative; no transaction is stuck `COMPLETING`; every reservation matches a
+completed transaction; and Analytics has read every scan.
+
+### Graded reports (2026-10-23)
 
 | Report | Config | tx/s | items/s | COMPLETE err % | Invariant |
 | --- | --- | --- | --- | --- | --- |
-| [`report-20261013-093301.json`](../load-client/reports/005-service-architecture/report-20261013-093301.json) | default (10 stations / 60 s) | 220.6 | 4 250 | 45.4 % | PASS |
-| [`report-20261013-093519.json`](../load-client/reports/005-service-architecture/report-20261013-093519.json) | stress (100 stations / 120 s) | 190.9 | 5 242 | 61.7 % | PASS |
+| [`report-20261023-104702.json`](../load-client/reports/007-microservices-architecture/report-20261023-104702.json) | default (10 stations / 60 s) | 200.5 | 3 730 | 43.2 % | PASS |
+| [`report-20261023-104920.json`](../load-client/reports/007-microservices-architecture/report-20261023-104920.json) | stress (100 stations / 120 s) | 196.2 | 5 448 | 62.1 % | PASS |
 
-Every error is a contract-defined `409 INSUFFICIENT_STOCK` once hot SKUs sell out.
+Every error is a contract-defined `409 INSUFFICIENT_STOCK` once hot SKUs sell out; there were
+no `5xx` responses, timeouts or tracebacks.
 
-Throughput is about 70 % of Week 4's native single-process run. These results are not
-directly comparable to Weeks 1–4. The cause is the deployment, not the 005 code, which is
-as fast as the monolith natively. Docker Desktop port forwarding and VM overhead slow every
-round trip, and the hot-SKU lock turns that into lost throughput. The measured breakdown is in
-[`../load-client/reports/README.md`](../load-client/reports/README.md#week-5--domain-services-under-docker-compose-2026-10-13).
+**Against Week 5: 91 % (default) and 103 % (stress).** Against Week 6, whose hot-path code this
+builds on, it is 76 % and 87 %: a completion is now three local transactions in Checkout around
+one call to Inventory, instead of one transaction. The per-step timings, and a regression this
+work found and fixed (a savepoint that held the hot-SKU locks across extra round trips), are in
+[`../load-client/reports/README.md`](../load-client/reports/README.md#week-7--microservices-a-private-store-per-service-2026-10-23).
+As in earlier weeks, results are not directly comparable to the native runs of Weeks 1–4: the
+whole system runs inside Docker Desktop's VM.
 
-### Spec 006: hot-path latency
+## Inspect
 
-The [spec 006 investigation](specs/006-service-perf-investigation/investigation.md) showed
-that throughput is capped by the hot-SKU stock lock, and that the lock's hold time is client
-round trips. Three changes follow from it ([plan](specs/006-service-perf-investigation/plan.md)):
-
-- **Completion**: the critical section is one statement (`repos.checkout.complete_basket`).
-  The locks wait on `COMMIT` only, instead of four to five round trips.
-- **Start and scan**: these use autocommit sessions (`checkout_data.get_autocommit_session`).
-  Their single statement makes one round trip.
-- **Service images**: they run uvicorn's `httptools` parser (`UVICORN_HTTP`, set it to `h11`
-  to revert). The gateway clears the client's `Upgrade: h2c` explicitly.
-
-Reports regenerated with these changes are under `../load-client/reports/006-hot-path-latency/`
-(`REPORT_DIR=006-hot-path-latency ./scripts/run_load_tests.sh all`).
-
-## Inspect stock
-
-Connect to the compose database from the host (port 5433), or from inside the container:
+Each database is reachable from the host on its published port (user and password are in
+`.env.example`), or from inside its container:
 
 ```bash
-psql -h 127.0.0.1 -p 5433 -U checkout checkout          # password: checkout
-docker compose exec postgres psql -U checkout -d checkout
+psql -h 127.0.0.1 -p 5442 -U checkout_user checkout     # password: checkout_pass
+psql -h 127.0.0.1 -p 5443 -U inventory_user inventory   # password: inventory_pass
+docker compose exec inventory-db psql -U inventory_user -d inventory
 ```
 
-One row for the whole catalog. `units_sold` should equal the `Units decremented` that the
-invariant check reports:
+Stock, in Inventory's database. `units_sold` should equal the `Units decremented` that the check
+reports:
 
 ```sql
 SELECT count(*)                                   AS skus,
@@ -305,21 +289,25 @@ SELECT count(*)                                   AS skus,
   FROM inventory_stock;
 ```
 
-What is hot right now against what is left to sell: the popular-items snapshot joined to
-live stock. A high-rank SKU at `0` is what turns later baskets into `409 INSUFFICIENT_STOCK`:
+Reservations, one per `(transaction, epoch)`; `APPLIED` ones belong to completed transactions,
+`RELEASED` ones are rolled-back attempts:
 
 ```sql
-SELECT r.ord AS rank, r.item->>'sku' AS sku, (r.item->>'scanCount')::int AS scans, s.current_stock
-  FROM popular_window_snapshot p,
-       LATERAL jsonb_array_elements(p.ranking) WITH ORDINALITY AS r(item, ord)
-  JOIN inventory_stock s ON s.sku = r.item->>'sku'
- ORDER BY r.ord
- LIMIT 20;
+SELECT state, count(*) FROM stock_adjustment GROUP BY state;
 ```
 
-How the pipeline is doing:
+Completions in Checkout's database; after a quiet moment nothing should be `RESERVING`,
+`RESERVED` or `COMPENSATING`:
+
+```sql
+SELECT state, count(*) FROM completion GROUP BY state;
+```
+
+What Analytics is serving, and how far it has read:
 
 ```bash
+curl -s 'localhost:8080/analytics/popular-items?limit=5'
+curl -s localhost:8084/internal/reports/cursor        # {"lastScanId": ..., "windowEnd": ...}
 docker compose logs analytics | grep -E 'pipeline|window published|gap skipped' | tail
 ```
 
@@ -327,49 +315,58 @@ docker compose logs analytics | grep -E 'pipeline|window published|gap skipped' 
 
 | Concern | Approach | Where |
 | --- | --- | --- |
-| Routing | nginx, by path: `= /items` → catalog, `/transactions` → checkout, `/inventory/` → inventory, `/analytics/` → analytics, everything else → checkout (same 404 body as before) | `gateway/nginx.conf` |
-| Catalog | Each service that needs it loads its own copy at startup; `GET /items` is a pre-rendered body in ascending SKU order | `checkout_data/catalog.py`, `catalog_service` |
-| Scan | One CTE: bump the transaction's counters, insert the line, `RETURNING` both. Runs in autocommit, so it is one round trip with no `BEGIN`/`COMMIT` (start does the same) | `checkout_service/service.py` → `repos/checkout.py` |
-| Completion | One DB transaction: lock the tx row, read the basket, then **one statement** (`complete_basket`) that locks the stock rows **in SKU order**, checks every quantity, decrements, inserts alert rows on threshold crossing and finalizes — or modifies nothing, which answers `409`. Only `COMMIT` waits on a round trip while the hot-SKU locks are held | `checkout_service/service.py` → `repos/checkout.py` |
-| Never oversell | The conditional `UPDATE`; `CHECK (current_stock >= 0)` as a backstop. Correct across Checkout replicas because the locks are in the database | `repos/checkout.py` |
-| Low-stock report | Live stock joined to the latest alert per SKU | `inventory_service` → `repos/inventory.py` |
-| Popular items | Persistent pipeline tailing `transaction_item`; one snapshot row every worker reads | `analytics_service/pipeline.py`, `supervisor.py`, `popular_items.py` |
-| Money | Integer cents end to end | `checkout_data/money.py` |
+| Routing | nginx, by path: `= /items` → catalog, `/transactions` → checkout, `/inventory/` → inventory, `/analytics/` → analytics, `/internal/` → 404, everything else → checkout (same 404 body as before). Stamps `X-Request-ID` | `gateway/nginx.conf` |
+| Catalog | A CSV loaded whole into memory; `GET /items` is a pre-rendered body in ascending SKU order. Other services keep a lazily loaded snapshot of it | `catalog_service/store.py`, each service's `catalog_client.py` |
+| Scan | One CTE: bump the transaction's counters, insert the line (with the price from the snapshot), `RETURNING` both. Autocommit, so one round trip; no other service is called | `checkout_service/service.py` → `repo.py` |
+| Completion | The saga above | `checkout_service/saga.py`, `recovery.py`; `inventory_service/reserve.py` |
+| Never oversell | Inventory's conditional statement locks the stock rows in SKU order, checks, decrements and records the reservation at once; `CHECK (current_stock >= 0)` as a backstop | `inventory_service/reserve.py` |
+| Low-stock report | Live stock joined to the latest alert per SKU; names from Catalog's snapshot | `inventory_service/low_stock.py` |
+| Popular items | In-memory pipeline pulling Checkout's scan log | `analytics_service/pipeline.py`, `supervisor.py`, `popular_items.py` |
+| Calls between services | One client: connect 0.5 s, read 2 s, idempotent calls retried within a budget, the request id forwarded | `checkout_web/client.py` |
+| Money | Integer cents end to end | `checkout_web/money.py` |
 
 ## Layout
 
 ```
-compose.yaml            postgres, seed, catalog, checkout, inventory, analytics, gateway, tools
-compose.test.yaml       test-stack override (checkout_test, small catalog, separate images)
-gateway/                nginx.conf + Dockerfile — routing only
+compose.yaml            checkout-db, inventory-db, 3 seed jobs, catalog, checkout, inventory,
+                        analytics, gateway, tools; networks edge, mesh and one per database
+compose.test.yaml       test-stack override (small catalog, separate project and images)
+gateway/                nginx.conf + Dockerfile: routing only
 packages/
-  checkout_data/        SHARED DATA ACCESS: schema, engine, ownership registry, repos/<service>.py,
-                        catalog cache, seed and verify CLIs (+ the checkout-tools Dockerfile)
-  checkout_web/         SHARED HTTP CONVENTIONS: errors, request helpers, app factory, /healthz
+  checkout_web/         SHARED, DATA-FREE: errors, request helpers and ids, app factory, /healthz,
+                        money, the service client
 services/
-  catalog/              catalog_service    + requirements.lock + Dockerfile
-  checkout/             checkout_service   (service, alerts, sweeper)
-  inventory/            inventory_service  (low_stock)
-  analytics/            analytics_service  (pipeline, supervisor, popular_items)
+  catalog/              catalog_service    store (CSV), seed + requirements.lock + Dockerfile
+  checkout/             checkout_service   service, saga, recovery, sweeper, repo, models, seed
+  inventory/            inventory_service  reserve, low_stock, repo, models, seed
+  analytics/            analytics_service  pipeline, supervisor, scan_source, scan_window, state
+tools/                  verify_invariant.py + the checkout-tools Dockerfile
 scripts/
   run_load_tests.sh     fresh stack → load → verify, for the default and stress runs
-  check_boundaries.py   the seven service-boundary rules
-  check_independence.sh stop/restart each service; the rest must keep working
+  check_boundaries.py   the eleven service-boundary rules
+  check_isolation.sh    no service can reach another's store
+  check_independence.sh recreate, then stop, each service; only its dependants may fail
+  check_crash_recovery.sh   kill Checkout under load; the stores must agree
+  trace_request.sh      one request id across every service's log
+  step_timings.py       per-step timings from the logs
   lock_services.sh      regenerate the per-image requirements.lock files
-  seed.py, verify_invariant.py   host shims for the checkout_data CLIs
-tests/                  contract / integration / unit; _dispatch.py mirrors the gateway
+  verify_invariant.py   host entry for tools/verify_invariant.py
+tests/                  contract / integration / failure / unit; _dispatch.py is the gateway and the
+                        network, in-process
 ```
 
 ## Design artifacts
 
-- Week 5 (this architecture): [`specs/005-service-architecture/`](./specs/005-service-architecture/):
-  - [spec](./specs/005-service-architecture/spec.md)
-  - [plan](./specs/005-service-architecture/plan.md)
-  - [research](./specs/005-service-architecture/research.md)
-  - [data model](./specs/005-service-architecture/data-model.md)
-  - [contracts](./specs/005-service-architecture/contracts/)
-  - [quickstart](./specs/005-service-architecture/quickstart.md)
-  - [tasks](./specs/005-service-architecture/tasks.md)
+- Week 7 (this architecture): [`specs/007-microservices-architecture/`](./specs/007-microservices-architecture/):
+  - [spec](./specs/007-microservices-architecture/spec.md)
+  - [plan](./specs/007-microservices-architecture/plan.md)
+  - [research](./specs/007-microservices-architecture/research.md)
+  - [data model](./specs/007-microservices-architecture/data-model.md)
+  - [contracts](./specs/007-microservices-architecture/contracts/)
+  - [quickstart](./specs/007-microservices-architecture/quickstart.md)
+  - [tasks](./specs/007-microservices-architecture/tasks.md)
+- Week 6 (hot-path latency): [`specs/006-service-perf-investigation/`](./specs/006-service-perf-investigation/)
+- Week 5 (services over one shared database): [`specs/005-service-architecture/`](./specs/005-service-architecture/)
 - Week 4 (streaming pipeline): [`specs/004-streaming-analytics/`](./specs/004-streaming-analytics/)
 - Week 3 (pipelined analytics): [`specs/003-pipelined-analytics/`](./specs/003-pipelined-analytics/)
 - Week 2 (layering): [`specs/002-layered-architecture/`](./specs/002-layered-architecture/)

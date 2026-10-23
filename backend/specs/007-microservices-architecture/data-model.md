@@ -22,7 +22,8 @@ The file lives on a volume mounted read-write into `seed-catalog` and **read-onl
 | --- | --- | --- |
 | `transaction` | `id` bigint identity PK, `station_id` text, `status` enum `OPEN/COMPLETING/COMPLETED/CANCELLED`, `item_count` int, `running_total_cents` bigint, `total_amount_cents` bigint null, `started_at`, `completed_at` null | `COMPLETING` is internal; the public API reports it as `OPEN`. Partial index on `started_at WHERE status='OPEN'` for the sweeper |
 | `transaction_item` | `id` bigint identity PK (the global **scan sequence**), `transaction_id` bigint FK → `transaction`, `sku` text, `unit_price_cents` int, `scanned_at` | Also the durable scan log that Analytics reads through `GET /internal/scans` (primary-key range read). `sku` has **no** FK (catalog is another service's data); `unit_price_cents` is the price snapshot taken at scan time |
-| `completion` | `transaction_id` bigint PK FK → `transaction`, `state` enum, `total_cents` bigint, `attempts` int, `updated_at` timestamptz, `last_error` text null | One row per in-flight or finished saga. Drives recovery. See state machine below |
+| `completion` | `transaction_id` bigint PK FK → `transaction`, `epoch` int (starts at 1, +1 for each later attempt on the same transaction), `state` enum `RESERVING/RESERVED/COMPLETED/COMPENSATING/ABORTED`, `total_cents` bigint, `attempts` int, `updated_at` timestamptz, `last_error` text null | One row per transaction, reused by each attempt. Drives recovery. See state machine below |
+| `scan_log` | `id` smallint PK (=1), `token` text | Names this incarnation of the scan log. The seed changes it whenever the run state is reset; `GET /internal/scans` reports it as `logId` so Analytics notices a replaced log |
 
 **Transaction state machine**
 
@@ -38,28 +39,32 @@ OPEN ──sweeper (stale)──▶ CANCELLED          (COMPLETING rows are neve
 ```text
 RESERVING ──reserve ok──▶ RESERVED ──finalize──▶ COMPLETED
     │                         │
-    │ rejected: row deleted   │ finalize fails
+    │ rejected: ABORTED       │ finalize fails
     │ unknown outcome         ▼
-    └────────────────▶ COMPENSATING ──release acked──▶ (row deleted, tx → OPEN)
+    └────────────────▶ COMPENSATING ──release acked──▶ ABORTED (tx → OPEN)
+
+ABORTED ──the shopper completes again──▶ RESERVING (epoch + 1)
 ```
 
-Rules: `COMPLETED` rows are kept for audit; `RESERVING/RESERVED/COMPENSATING` rows older than the
-recovery lease are picked up by the recovery loop. A transaction is `COMPLETING` exactly when it
-has a non-`COMPLETED` completion row.
+Rules: `COMPLETED` and `ABORTED` are terminal. `ABORTED` rows are kept so the next attempt gets
+the next epoch. `RESERVING/RESERVED/COMPENSATING` rows older than the recovery lease are picked
+up by the recovery loop. A transaction is `COMPLETING` exactly when its completion row is in one
+of those three states.
 
 ## 3. Inventory (`inventory-db`)
 
 | Table | Columns | Notes |
 | --- | --- | --- |
 | `inventory_stock` | `sku` text PK, `current_stock` int `>= 0`, `initial_stock` int | Hot row for popular SKUs. No FK to catalog |
-| `stock_adjustment` | `transaction_id` bigint PK, `state` enum `APPLIED/RELEASED`, `lines` jsonb (`[{sku, qty}]`), `created_at`, `updated_at` | The idempotency record. `RELEASED` with no prior `APPLIED` is a **tombstone** that blocks a late `reserve` |
+| `stock_adjustment` | `transaction_id` bigint and `epoch` int, together the PK; `state` `APPLIED/RELEASED` (checked), `lines` jsonb (`[{sku, qty}]`), `created_at`, `updated_at` | The idempotency record, one per completion attempt. `RELEASED` with no prior `APPLIED` is a **tombstone** that blocks a late `reserve` of the *same* epoch |
 | `low_stock_alert` | `id` bigint identity PK, `sku` text, `current_stock` int, `threshold` int, `triggered_at` | Raised inside the reserve statement when stock crosses below the threshold (same rule as 001 FR-006). Not deleted on release; it records that stock was once low |
 
 **Adjustment state machine**
 
 ```text
+per (transaction, epoch):
 (none) ──reserve──▶ APPLIED ──release──▶ RELEASED
-(none) ──release──▶ RELEASED (tombstone; later reserve returns "released")
+(none) ──release──▶ RELEASED (tombstone; a later reserve of this epoch returns "released")
 ```
 
 ## 4. Analytics (in memory, no database)
@@ -100,8 +105,8 @@ window; `streaming` retries the poll and keeps serving the last ranking.
 
 1. Per SKU: `initial_stock − current_stock == completed line items` (Inventory vs Checkout).
 2. `current_stock >= 0` everywhere.
-3. No transaction is `COMPLETING`, and no `completion` row is in a non-terminal state, on a
-   quiescent system.
-4. Every `APPLIED` adjustment corresponds to a `COMPLETED` transaction, and every `RELEASED`
-   adjustment to a transaction that is not `COMPLETED`.
+3. No transaction is `COMPLETING`, and no `completion` row is outside `COMPLETED`/`ABORTED`,
+   on a quiescent system.
+4. Every `APPLIED` adjustment corresponds to a `COMPLETED` transaction and vice versa (a
+   transaction has at most one `APPLIED` adjustment; `RELEASED` ones are rolled-back attempts).
 5. Once idle (after the gap grace): Analytics' `lastScanId` equals Checkout's `maxScanId`.

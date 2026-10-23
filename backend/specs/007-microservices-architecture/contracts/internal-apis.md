@@ -19,25 +19,28 @@ Allowed callers (enforced by [service-boundaries.md](./service-boundaries.md)):
 `POST /internal/reservations`  (deadline 2 s)
 
 ```json
-{ "transactionId": "tx-123", "lines": [ { "sku": "SKU-000001", "quantity": 2 } ] }
+{ "transactionId": "tx-123", "epoch": 1, "lines": [ { "sku": "SKU-000001", "quantity": 2 } ] }
 ```
 
-`lines` are unique by `sku`. Order does not matter; Inventory locks in SKU order.
+`epoch` (integer ≥ 1) names the completion attempt: a reservation is keyed by
+`(transactionId, epoch)`. `lines` are unique by `sku`. Order does not matter; Inventory locks in
+SKU order.
 
 | Status | Body | Meaning |
 | --- | --- | --- |
-| `200` | `{ "transactionId": "tx-123", "state": "APPLIED", "replayed": false }` | Stock reduced, adjustment recorded, alerts raised. `replayed: true` when the same transaction was already applied (no second decrement) |
+| `200` | `{ "transactionId": "tx-123", "epoch": 1, "state": "APPLIED", "replayed": false }` | Stock reduced, adjustment recorded, alerts raised. `replayed: true` when the same transaction was already applied (no second decrement) |
 | `409` | `{ "error": "INSUFFICIENT_STOCK", "message": "Insufficient stock for SKU-000001.", "shortSkus": ["SKU-000001"] }` | At least one SKU is missing or short. Nothing changed. Checkout re-maps this to its own `409 INSUFFICIENT_STOCK` |
-| `409` | `{ "error": "RESERVATION_RELEASED", ... }` | A `release` for this transaction already arrived (tombstone). Checkout treats it as a failed attempt and compensates |
+| `409` | `{ "error": "RESERVATION_RELEASED", ... }` | A `release` for this `(transaction, epoch)` already arrived (tombstone). Checkout treats it as a failed attempt and compensates |
+| `400` | `ApiError` `INVALID_REQUEST` | `transactionId`, `epoch` or `lines` is missing or malformed |
 | `5xx` / timeout | n/a | Unknown outcome. Caller retries the same request (idempotent) |
 
 ## Inventory: release (compensation)
 
-`DELETE /internal/reservations/{transactionId}`  (deadline 2 s)
+`DELETE /internal/reservations/{transactionId}?epoch=<n>`  (deadline 2 s)
 
 | Status | Body | Meaning |
 | --- | --- | --- |
-| `200` | `{ "transactionId": "tx-123", "state": "RELEASED", "unitsRestored": 3 }` | Applied adjustment reversed, or tombstone recorded when there was none (`unitsRestored: 0`) |
+| `200` | `{ "transactionId": "tx-123", "epoch": 1, "state": "RELEASED", "unitsRestored": 3 }` | Applied adjustment reversed, or tombstone recorded when there was none (`unitsRestored: 0`) |
 | `200` | same, `"alreadyReleased": true` | Idempotent repeat |
 
 ## Checkout: read scans (called by Analytics)
@@ -50,20 +53,21 @@ and appears on a later call (Analytics' watermark logic copes with the hole).
 
 | Status | Body | Meaning |
 | --- | --- | --- |
-| `200` | `{ "scans": [ { "scanId": 4511, "sku": "SKU-000002" }, { "scanId": 4512, "sku": "SKU-000007" } ], "maxScanId": 4512 }` | Scans after `after`, in id order. `maxScanId` is the highest committed scan id in the whole table (0 when empty), independent of `limit`. `limit=0` returns no scans and is the cheap way to read `maxScanId` |
+| `200` | `{ "scans": [ { "scanId": 4511, "sku": "SKU-000002" }, { "scanId": 4512, "sku": "SKU-000007" } ], "maxScanId": 4512, "logId": "9f0c…" }` | Scans after `after`, in id order. `maxScanId` is the highest committed scan id in the whole table (0 when empty), independent of `limit`. `limit=0` returns no scans and is the cheap way to read `maxScanId`. `logId` names this incarnation of the scan log: it changes when Checkout's data is reset, so a reader that sees a different one starts over instead of trusting its position |
 | `400` | `ApiError` `INVALID_REQUEST` | `after` or `limit` is missing, not an integer, or out of range |
 
-Reads are idempotent and side-effect free: Checkout keeps no per-caller state, so Analytics can
-restart, re-read or re-bootstrap at any time. Overlapping reads are allowed.
+Reads are idempotent and side-effect free: Checkout keeps no per-caller state (only the one
+`logId` row), so Analytics can restart, re-read or re-bootstrap at any time. Overlapping reads
+are allowed.
 
 ## Read-only reports (verification tool)
 
 | Route | Service | Response |
 | --- | --- | --- |
-| `GET /internal/reports/sold-by-sku` | Checkout | `{ "sold": { "SKU-000001": 120, ... }, "completing": 0, "openCompletions": 0, "completedTransactions": [..] }`: units on `COMPLETED` transactions per SKU, count of `COMPLETING` transactions, count of non-terminal `completion` rows, ids of completed transactions |
+| `GET /internal/reports/sold-by-sku` | Checkout | `{ "sold": { "SKU-000001": 120, ... }, "completing": 0, "openCompletions": 0, "completedTransactions": ["tx-1", ..] }`: units on `COMPLETED` transactions per SKU, count of `COMPLETING` transactions, count of `completion` rows not yet `COMPLETED` or `ABORTED`, ids of completed transactions |
 | `GET /internal/reports/scan-count` | Checkout | `{ "scans": 98211, "maxScanId": 98211 }` |
 | `GET /internal/reports/cursor` | Analytics | `{ "lastScanId": 98211, "windowEnd": 98000 }`: the tail's watermark and the latest published window end |
-| `GET /internal/reports/stock` | Inventory | `{ "stock": [ { "sku": "...", "initial": 10000, "current": 9880 } ], "adjustments": { "applied": [..tx ids..], "released": [..tx ids..] } }` |
+| `GET /internal/reports/stock` | Inventory | `{ "stock": [ { "sku": "...", "initial": 10000, "current": 9880 } ], "adjustments": { "applied": ["tx-1", ..], "released": ["tx-2", ..] } }` |
 
 ## Client behavior (`checkout_web.client`)
 

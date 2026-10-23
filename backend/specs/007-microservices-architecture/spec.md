@@ -125,7 +125,7 @@ each forced to fail or time out at each step. After each run, check that the sto
 2. **Given** a basket that needs more stock than Inventory holds, **When** completion is attempted, **Then** the shopper gets the contract's insufficient-stock conflict, no stock changes, and the transaction is not marked completed.
 3. **Given** Inventory has reduced stock but a later step fails, **When** the failure is detected, **Then** the stock reduction is reversed and the transaction is not left half-completed.
 4. **Given** Analytics is down while shoppers scan and complete, **When** it recovers, **Then** it reads Checkout's scans, counts every scan made meanwhile exactly once, and popular-items reflects them.
-5. **Given** a completion request is retried or runs twice at once (client timeout, duplicate delivery), **When** it is processed, **Then** the stock is reduced once, not twice. A retry while the first is still in flight converges on the same single outcome, and a retry after completion gets the contract's existing "not open" conflict.
+5. **Given** a completion request is retried or runs twice at once (client timeout, duplicate delivery), **When** it is processed, **Then** the stock is reduced once, not twice. A second completion while the first is still running, or after it has finished, gets the contract's existing "not open" conflict. A completion whose driver has died is taken over by a retry once its lease has expired.
 6. **Given** the system is stopped in the middle of a completion and restarted, **When** it comes back, **Then** the interrupted completion is finished or rolled back, never left in limbo.
 
 ---
@@ -176,7 +176,7 @@ and the invariant passes.
 - **Analytics restarts while Checkout is down**: Analytics has no store of its own, so it cannot rebuild until Checkout returns. Popular-items answers with the empty window in the meantime. This is accepted: the data is derived and recomputed within seconds of Checkout's return.
 - **Checkout is down while Analytics runs**: Analytics keeps serving its last ranking from memory and resumes reading when Checkout returns.
 - **Two shoppers complete baskets competing for the last units**: exactly the units available are sold. The loser gets the insufficient-stock conflict. Stock never goes negative.
-- **Duplicate or retried completion**: no double stock reduction. Concurrent duplicates converge on one outcome. A repeat after completion gets the contract's "not open" conflict.
+- **Duplicate or retried completion**: no double stock reduction. A concurrent duplicate, and a repeat after completion, get the contract's "not open" conflict. A retry after a refused completion (for example while Inventory was down) works as soon as Inventory is back.
 - **Analytics reads the same scan twice** (for example after a retry): counted once.
 - **A coordination step succeeds but its acknowledgement is lost**: retrying the step has no additional effect.
 - **A microservice crashes mid-completion**: after restart, the in-progress completion is resumed or compensated. No transaction stays permanently "completing".

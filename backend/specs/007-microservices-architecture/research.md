@@ -24,14 +24,27 @@ here. *Two-phase commit* across databases: forbidden by FR-012 and blocks on coo
 
 ## R2. Inventory step: one idempotent local transaction; the hot lock is released before finalize
 
-**Decision**: `POST /internal/reservations` runs, in Inventory's database, (a) read the
-`stock_adjustment` row for the transaction id (replay returns the recorded result), then (b) the
-spec 006 single-statement critical section, extended with an insert into `stock_adjustment` keyed
-by transaction id (state `APPLIED`), then COMMIT. A unique-violation on a concurrent duplicate is
-caught and treated as a replay. `DELETE /internal/reservations/{tx}` (release) flips `APPLIED` →
-`RELEASED` and adds the units back in one statement. If no row exists it inserts a `RELEASED`
-**tombstone**, so a `reserve` that arrives after a `release` (timeout race) is refused instead of
-applied.
+**Decision**: `POST /internal/reservations` runs, in Inventory's database, the spec 006
+single-statement critical section, extended with (a) a lookup of the `stock_adjustment` row for
+`(transaction, epoch)` folded into the same statement (a repeat is answered from the recorded
+result, with no stock change), and (b) an insert of that row (state `APPLIED`) under the same
+guard that decrements, then COMMIT. Nothing else is sent while the locks are held: no separate
+query and no savepoint. If two identical reserves race, the loser's insert conflicts and it is
+repeated once in a fresh transaction (`reserve_once`).
+`DELETE /internal/reservations/{tx}?epoch=n` (release) flips `APPLIED` → `RELEASED` and adds the
+units back. If no row exists it inserts a `RELEASED` **tombstone**, so a `reserve` of the same
+attempt that arrives after a `release` (timeout race) is refused instead of applied.
+
+**The epoch.** The key is `(transaction, epoch)`, not the transaction alone. After a rollback
+the transaction is open again and the shopper may complete it again; with a per-transaction
+tombstone that retry would be refused forever. Checkout increments the epoch each time it starts
+a saga on a transaction, so the old release and the new attempt never meet.
+
+**What measuring changed.** The first implementation looked the adjustment up with a separate
+query and wrapped the statement in a savepoint to survive a lost race. That put a `RELEASE
+SAVEPOINT` round trip inside the lock window (three round trips instead of Week 6's one) and
+Inventory's reservation averaged 62.6 ms under stress; folding the lookup in and dropping the
+savepoint brought it to 24.5 ms (load-client/reports/README.md, Week 7).
 
 **Rationale**: Spec 006 showed throughput depends on how long the hot SKU's stock lock is held
 (`SKU-000001` is in ~68 % of baskets). With the saga, that lock is held only inside Inventory
@@ -50,27 +63,31 @@ problem.
 
 | Step outcome | Action |
 | --- | --- |
-| Inventory returns insufficient stock | Local tx: transaction → `OPEN`, completion row deleted. Return `409 INSUFFICIENT_STOCK` (nothing to undo) |
+| Inventory returns insufficient stock | Local tx: transaction → `OPEN`, completion `ABORTED`. Return `409 INSUFFICIENT_STOCK` (nothing to undo) |
 | Inventory call times out / connection error / 5xx | Retry the same `reserve` (idempotent) up to 2 more times within a 4 s budget. Still unknown → state `COMPENSATING`, send `release`, then transaction → `OPEN`, return `503` in the contract's error shape |
-| `release` itself cannot be delivered | Leave `COMPENSATING`; recovery keeps retrying. The shopper already got `503` |
+| `release` itself cannot be delivered | Leave `COMPENSATING`. The shopper already got `503`. Their next `complete` finishes the rollback (release, reopen) and starts a fresh attempt; failing that the recovery loop does |
 | Finalize local tx fails after a successful reserve | `COMPENSATING` → `release` → `OPEN` → `503` |
-| Duplicate `complete` while `COMPLETING` | Joins the same saga: every step is idempotent, so both drivers converge on one outcome |
+| `complete` while another is running | Refused with `409 TRANSACTION_NOT_OPEN` while the saga's lease is fresh (a live driver), as 005 refused the second of two overlapping completes. Once the lease expires (the driver died), a retry **takes the saga over** from its recorded state |
 | `complete` on `COMPLETED` | `409` as in 005 (`TRANSACTION_NOT_OPEN`). A client that lost the original response can `GET /transactions/{id}` to see `COMPLETED` |
 
 **Rationale**: Roll back when the outcome is unknown, roll forward only when stock is certainly
 reserved. Rolling back is safe because `release` is idempotent and tombstoned, and the shopper
-simply retries. "Retried completion returns the same receipt" (spec US3.5) is met while the
-saga is in flight; after it finishes the contract's existing 409 applies (Spec Amendment 3 below).
+simply retries (as a new epoch). The contract's behaviour for duplicates is kept: a second
+`complete` is a `409`, whether the first is still running or has finished (Spec Amendment 3).
+Only a completion whose driver has died, which the contract never had to consider, can be
+taken over.
 
 **Alternatives**: Always roll forward, retrying `reserve` indefinitely, ties up shopper requests
 and stock when Inventory is down.
 
 ## R4. Recovery loop
 
-**Decision**: A background task in Checkout selects `completion` rows not updated for 10 s using
-`FOR UPDATE SKIP LOCKED`, so several Checkout replicas can run it. `RESERVING` → treat as unknown →
-`release`, transaction → `OPEN`. `RESERVED` → finalize (roll forward). `COMPENSATING` → resume
-`release`. Runs every 2 s. Every action reuses the same idempotent calls as the live path.
+**Decision**: A background task in Checkout claims `completion` rows (not `COMPLETED` or
+`ABORTED`) not updated for 10 s by bumping their lease under `FOR UPDATE SKIP LOCKED`, so several
+Checkout replicas can run it, then acts outside that transaction. `RESERVING` → treat as
+unknown → `release`, transaction → `OPEN`. `RESERVED` → finalize (roll forward). `COMPENSATING`
+→ resume `release`. Runs every 2 s. Every action reuses the same idempotent calls as the live
+path.
 
 **Rationale**: Satisfies FR-015 with no extra infrastructure and works the same after a crash or a
 lost message.
@@ -278,9 +295,9 @@ corrected in `spec.md`:
    completing and expect popular-items to count those scans.
 2. **Catalog data is a cached snapshot, not a per-scan call** (R6), so scans survive a Catalog
    outage once the cache is warm.
-3. **A retried `complete` on an already-completed transaction keeps the contract's `409`**
-   (R3), rather than returning the same receipt. Retries *during* the saga converge on one
-   outcome, and stock is reduced once either way.
+3. **A repeated `complete` keeps the contract's `409`** (R3), rather than returning the same
+   receipt or joining the saga in flight. The existing INV-3 test (two overlapping completes
+   give one `200` and one `409`) requires it. Stock is reduced once either way.
 4. **Analytics needs no database** (R5). Its state is derived from Checkout's scans, so it
    keeps a rolling window in memory and pulls scans from Checkout. This removes the Analytics
    database, the scan relay and cursor table, the ingest endpoint and the advisory lock, and

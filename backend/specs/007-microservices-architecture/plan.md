@@ -118,11 +118,19 @@ backend/
 │       ├── scan_window.py           # in-memory rolling window of recent scans
 │       ├── internal_reports.py      # GET /internal/reports/cursor
 │       └── catalog_client.py        # no database, no SQLAlchemy, no seed
+├── tools/
+│   ├── verify_invariant.py          # cross-store check over /internal/reports/*; opens no database
+│   └── Dockerfile                   # the checkout-tools image (httpx only)
 ├── scripts/
-│   ├── check_boundaries.py          # rewritten rules
-│   ├── verify_invariant.py          # now calls internal report endpoints on all services
+│   ├── check_boundaries.py          # the eleven rules
+│   ├── check_isolation.sh           # no service can reach another's store (from inside the containers)
+│   ├── check_independence.sh        # recreate, then stop, each service; only dependants may fail
+│   ├── check_crash_recovery.sh      # kill Checkout under load; the stores must agree afterwards
+│   ├── trace_request.sh             # one request id across every service's log
+│   ├── step_timings.py              # per-step timings from the logs
+│   ├── verify_invariant.py          # host entry for tools/verify_invariant.py
 │   ├── run_load_tests.sh            # REPORT_DIR default 007-microservices-architecture
-│   └── lock_services.sh             # adds httpx to each service's lock
+│   └── lock_services.sh             # one lock per service; none contains another service's package
 └── tests/
     ├── contract/                    # assertions unchanged
     ├── integration/                 # existing + saga, recovery, Analytics pull and rebuild
