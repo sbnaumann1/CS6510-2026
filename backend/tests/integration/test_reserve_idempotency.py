@@ -12,9 +12,7 @@ from inventory_service.db import SessionLocal
 
 
 async def do_reserve(tx_id, lines, threshold=50):
-    async with SessionLocal() as s:
-        async with s.begin():
-            return await reserve.reserve(s, tx_id, lines, threshold)
+    return await reserve.reserve_once(SessionLocal, tx_id, lines, threshold)
 
 
 async def do_release(tx_id):

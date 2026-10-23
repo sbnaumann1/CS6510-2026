@@ -68,11 +68,9 @@ async def reserve_stock(request: Request) -> Response:
     epoch = _parse_epoch(body.get("epoch"))
     lines = _parse_lines(body.get("lines"))
 
-    async with SessionLocal() as session:
-        async with session.begin():
-            result = await reservations.reserve(
-                session, tx_id, lines, settings.low_stock_threshold, epoch=epoch
-            )
+    result = await reservations.reserve_once(
+        SessionLocal, tx_id, lines, settings.low_stock_threshold, epoch=epoch
+    )
 
     def done(outcome: str) -> None:
         log_step("reserve", tx=public_id, outcome=outcome,
