@@ -49,3 +49,23 @@ async def test_catalog_down_after_the_snapshot_is_warm_does_not_stop_scans(clien
     r = await complete(client, tx)
     assert r.status_code == 200
     assert mesh.calls_to("catalog", "/items") == 1, "one fetch warmed it; none after"
+
+
+async def test_each_service_warms_its_catalog_snapshot_at_startup_and_retries_until_it_can(mesh):
+    """Checkout and Inventory load Catalog's list when they start, retrying while Catalog is
+    down, so a restarted service is warm before an outage of Catalog can matter."""
+    from checkout_service import catalog_client as checkout_catalog
+    from inventory_service import catalog_client as inventory_catalog
+
+    mesh.fail("catalog", "/items", times=2, mode="error")
+    for module in (checkout_catalog, inventory_catalog):
+        module.reset(mesh)
+        await module.warm_forever(retry_s=0.01)
+    # Checkout: one attempt (two calls, the second a retry) fails, the next succeeds; Inventory
+    # then finds Catalog healthy.
+    assert mesh.calls_to("catalog", "/items") == 4
+    assert await checkout_catalog.get_snapshot().get("SKU-000001") is not None
+    assert (await inventory_catalog.get_snapshot().names(["SKU-000001"]))["SKU-000001"] == "Item 1"
+
+    mesh.fail("catalog", "/items", times=10_000, mode="error")
+    assert await checkout_catalog.get_snapshot().get("SKU-000002") is not None, "served from memory"

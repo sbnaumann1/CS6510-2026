@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from checkout_service import api, internal_api, internal_reports, recovery, sweeper
+from checkout_service import api, catalog_client, internal_api, internal_reports, recovery, sweeper
 from checkout_service.config import settings
 from checkout_service.db import dispose_engine, ping
 from checkout_web.app import create_service_app
@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(_sweep_loop(), name="sweeper"),
         asyncio.create_task(recovery.recovery_loop(), name="recovery"),
+        asyncio.create_task(catalog_client.warm_forever(), name="catalog-warm-up"),
     ]
     try:
         yield

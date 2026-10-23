@@ -183,6 +183,8 @@ and Inventory.
 - Each run used a fresh stack (`docker compose down -v`, then `up --wait`) and the assignment's
   exact client flags. Produced by `backend/scripts/run_load_tests.sh all`, which also runs the
   cross-store invariant check after each run.
+- The code is that of the commit which adds these reports (`5dc3314`). Later commits changed only
+  documentation, the drill scripts, and a startup catalog warm-up in Checkout and Inventory.
 
 | Report | Scenario | Config | tx/s | items/s | COMPLETE err% | COMPLETE p95 | Invariant |
 | --- | --- | --- | --- | --- | --- | --- | --- |

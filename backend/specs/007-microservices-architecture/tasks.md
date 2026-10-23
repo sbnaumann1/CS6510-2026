@@ -229,9 +229,9 @@ description: "Task list for 007 microservices architecture"
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T070 [P] Run the whole of [quickstart.md](./quickstart.md) V1–V10 in order from a clean checkout of the branch and fix any step that does not behave as written (update the quickstart if the doc, not the code, is wrong).
-- [ ] T071 [P] Update `../architecture.md`, `../README.md` and `../PIPELINE_ARCHITECTURE.md` only where they still describe the shared database or `checkout_data` as current.
-- [ ] T072 Final validation: `uv run python scripts/check_boundaries.py`, `uv run pytest` (full suite), `./scripts/check_independence.sh`, `./scripts/check_isolation.sh`, and `scripts/verify_invariant.py` after the last load run all pass. Commit the reports and push.
+- [X] T070 [P] Run the whole of [quickstart.md](./quickstart.md) V1–V10 in order from a clean checkout of the branch and fix any step that does not behave as written (update the quickstart if the doc, not the code, is wrong).
+- [X] T071 [P] Update `../architecture.md`, `../README.md` and `../PIPELINE_ARCHITECTURE.md` only where they still describe the shared database or `checkout_data` as current.
+- [X] T072 Final validation: `uv run python scripts/check_boundaries.py`, `uv run pytest` (full suite), `./scripts/check_independence.sh`, `./scripts/check_isolation.sh`, and `scripts/verify_invariant.py` after the last load run all pass. Commit the reports and push.
 
 ---
 

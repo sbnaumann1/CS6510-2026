@@ -6,13 +6,15 @@ only by calling the reservation routes; Inventory never reads Checkout's data.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from checkout_web.app import create_service_app
-from inventory_service import api, internal_api, internal_reports
+from inventory_service import api, catalog_client, internal_api, internal_reports
 from inventory_service.db import dispose_engine, ping
 
 
@@ -28,9 +30,13 @@ async def lifespan(app: FastAPI):
         await ping()
     except Exception:
         log.warning("database not reachable yet; will retry on first use")
+    warm = asyncio.create_task(catalog_client.warm_forever(), name="catalog-warm-up")
     try:
         yield
     finally:
+        warm.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await warm
         await dispose_engine()
 
 

@@ -61,6 +61,16 @@ d = json.load(sys.stdin)
 sys.exit(0 if set(d) == {'error', 'message'} else 1)"
 }
 
+# --- precondition: a fresh stack ---------------------------------------------------------
+# The drills buy SKU-000001 and expect stock to be there, and expect an empty low-stock list
+# (otherwise that route needs Catalog for names, and rightly fails while Catalog is down).
+alerts=$(curl -s "$G/inventory/low-stock" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)["alerts"]))' 2>/dev/null || echo "?")
+if [ "$alerts" != "0" ]; then
+  echo "This drill needs a fresh stack (found $alerts low-stock alerts, or the stack is down)." >&2
+  echo "Run:  docker compose down -v && docker compose up -d --build --wait" >&2
+  exit 2
+fi
+
 # --- warm up: Checkout's catalog snapshot, so scans survive a Catalog outage ----------
 TX=$(new_tx); scan "$TX" >/dev/null; body POST "/transactions/$TX/complete" '{}' >/dev/null
 
@@ -82,9 +92,10 @@ done
 
 echo "== Part 2: stop one service at a time"
 
-# Part 1 recreated Checkout, which keeps its catalog snapshot in memory: warm it again, so
-# the Catalog outage below tests what it means to (a warm snapshot keeps scans working).
-TX=$(new_tx); scan "$TX" >/dev/null; body POST "/transactions/$TX/complete" '{}' >/dev/null
+# Part 1 recreated every service. Checkout and Inventory load their catalog snapshot at
+# startup (each worker process on its own), so give that a moment: the Catalog outage below
+# tests what it means to (a warm snapshot keeps scans working).
+sleep 3
 
 # -- catalog: the snapshots are warm, so nothing but /items itself fails
 echo " catalog down"

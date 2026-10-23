@@ -51,6 +51,11 @@ class CatalogSnapshot:
                     raise
         return {s: self._by_sku.get(s, s) for s in skus}
 
+    async def warm(self) -> None:
+        """Load the snapshot if it is empty. Raises UpstreamUnavailable if Catalog is down."""
+        if not self._by_sku:
+            await self._refresh()
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -63,6 +68,20 @@ def get_snapshot() -> CatalogSnapshot:
     if _snapshot is None:
         _snapshot = CatalogSnapshot(settings.catalog_url, _transport)
     return _snapshot
+
+
+async def warm_forever(retry_s: float = 2.0) -> None:
+    """Load the snapshot at startup, retrying until Catalog answers.
+
+    Each worker process keeps its own snapshot, so each warms its own. Until it has, a call
+    that needs Catalog fails cleanly if Catalog is down; afterwards Catalog's outages do not
+    matter (spec 007 research R6)."""
+    while True:
+        try:
+            await get_snapshot().warm()
+            return
+        except UpstreamUnavailable:
+            await asyncio.sleep(retry_s)
 
 
 def reset(transport: httpx.AsyncBaseTransport | None = None) -> None:
