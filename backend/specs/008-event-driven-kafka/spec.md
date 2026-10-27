@@ -31,7 +31,7 @@ Gateway, and the deliverables prove it: two load reports and an architecture dia
 
 | Today (spec 007) | After this feature |
 | --- | --- |
-| Checkout asks Catalog for an item's price when a scan is recorded | Catalog publishes item/price facts; Checkout keeps a local snapshot built from those events and prices scans from it |
+| Checkout asks Catalog for an item's price when a scan is recorded | Catalog publishes its fixed item list (SKU, name, price) once at startup and again on each restart; Checkout keeps a local snapshot built from it and prices scans from it |
 | Checkout orchestrates Inventory step by step during completion, with direct calls and compensation | Checkout publishes "transaction completed"; Inventory reacts, reduces stock, and publishes the outcome (stock reduced, or rejected for insufficient stock); Checkout reacts to the outcome and finalizes or compensates |
 | Analytics polls Checkout's scan log by sequence number | Checkout publishes each scan as an event; Analytics consumes them |
 | Inventory and Analytics ask Catalog for item names when answering requests | They use a local snapshot of item names built from Catalog's events |
@@ -175,13 +175,13 @@ anything.
 
 - **FR-001**: The external HTTP contract in `spec.yaml` MUST remain unchanged, and the unmodified load client MUST work against a single public address.
 - **FR-002**: Every business interaction between microservices MUST occur through events on the event broker. No microservice MAY call another microservice's endpoints or hold another microservice's address.
-- **FR-003**: The event broker MUST be Kafka. Each microservice MUST be a producer, a consumer, or both, and the system MUST define a named topic for each kind of fact (at minimum: catalog item changes, scans recorded, transaction completion requested, stock outcome).
+- **FR-003**: The event broker MUST be Kafka. Each microservice MUST be a producer, a consumer, or both, and the system MUST define a named topic for each kind of fact (at minimum: the published catalog, scans recorded, transaction completion requested, stock outcome).
 - **FR-004**: Each event MUST carry a unique event identifier, a type, the correlation identifier of the originating request, a timestamp, and a versioned payload described in a written schema.
 - **FR-005**: Events MUST be keyed so that all events about the same transaction (and all events about the same item) are processed in order.
 
 **Replacing each existing call**
 
-- **FR-006**: Catalog MUST publish its items and prices as events. Checkout MUST price scans from a local snapshot built from those events, and MUST NOT call Catalog.
+- **FR-006**: Catalog's items are fixed after seeding, so Catalog MUST publish the full item list (SKU, name, price) as events once at startup and again on every restart, retained so that a late or restarted consumer can read the whole list. Checkout MUST price scans from a local snapshot built from those events, and MUST NOT call Catalog.
 - **FR-007**: Checkout MUST publish each recorded scan as an event. Analytics MUST consume those events to build popular-items, and MUST NOT poll or call Checkout.
 - **FR-008**: Completing a transaction MUST be coordinated through events: Checkout publishes a completion request; Inventory reduces stock and publishes an outcome (success or insufficient stock); Checkout reacts to the outcome by finalizing or compensating. The shopper-facing request MUST wait for the outcome up to a bounded time and then return the contract result or a clean failure.
 - **FR-009**: Inventory and Analytics MUST obtain item names from a local snapshot built from Catalog's events, not from calls.
@@ -214,7 +214,7 @@ anything.
 
 - **Event**: An immutable record of a fact, with identifier, type, correlation identifier, timestamp, key, and versioned payload.
 - **Topic**: A named, ordered, durable stream of one kind of event, with one owning producer service.
-- **Item snapshot**: A service-local copy of Catalog's item names and prices, built from catalog events; owned by Catalog, read-only elsewhere.
+- **Item snapshot**: A service-local copy of Catalog's item names and prices, built from the catalog Catalog publishes at startup; owned by Catalog, read-only elsewhere.
 - **Transaction**: A shopper's basket owned by Checkout; moves from open to completion-requested to completed or rejected.
 - **Completion request / stock outcome**: The pair of events through which Checkout and Inventory agree on whether a transaction's stock can be taken.
 - **Scan event**: A record that an item was scanned into a transaction, consumed by Analytics.
