@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from checkout_web.app import create_service_app
 from checkout_web.lifecycle import cancel_and_wait
 from checkout_web.bus import Bus, KafkaBus
-from inventory_service import api, catalog_snapshot, eventbus, handlers, internal_api, internal_reports, outbox
+from inventory_service import api, catalog_snapshot, eventbus, handlers, internal_reports, outbox
 from inventory_service.config import settings
 from inventory_service.db import dispose_engine, ping
 
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
 
 app = create_service_app(
     "inventory",
-    [api.router, internal_api.router, internal_reports.router],
+    [api.router, internal_reports.router],
     ping,
     lifespan,
     readiness=readiness,

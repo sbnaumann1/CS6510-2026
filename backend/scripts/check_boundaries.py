@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-"""Service-boundary check (spec 007 FR-005, FR-007, FR-008, FR-022; SC-007).
+"""Service-boundary check (spec 007 FR-005, FR-007, FR-008, FR-022; spec 008 FR-002, FR-019).
 
     uv run python scripts/check_boundaries.py      # exit 1 on any violation
 
-Rules (specs/007-microservices-architecture/contracts/service-boundaries.md):
+Rules (specs/007-microservices-architecture/contracts/service-boundaries.md, and
+specs/008-event-driven-kafka/contracts/service-boundaries.md for E1-E10):
    1. a service imports only its own package, the standard library, third-party libraries
       and checkout_web
    2. checkout_web stays data-free; Catalog and Analytics use no database library
    3. no `checkout_data` package exists, and nothing imports it
    4. Checkout's and Inventory's SQL touches only tables in their own models.py
-   5. outbound HTTP goes through checkout_web.client, to the peers each service may call
    6. compose: each DATABASE_URL points at that service's own database, and Catalog and
       Analytics have none
    7. compose: a `*_data` network holds one service (plus its seed job); the catalog volume
@@ -18,6 +18,17 @@ Rules (specs/007-microservices-architecture/contracts/service-boundaries.md):
    9. compose/nginx: the gateway never proxies /internal/
   10. each service's requirements.lock is its own
   11. compose: Analytics runs a single instance
+  (5 -- outbound HTTP to an allowed peer -- is gone: since spec 008 no service calls another)
+  E1. no microservice code or configuration names another microservice's address
+  E2. no HTTP client library (or socket) in a microservice, in code or dependencies
+  E3. every topic a service uses is declared in events/topics.yaml and in its own events.py
+  E4. a topic has exactly one producing service (dead letters excepted)
+  E5. every consumed topic has a declared producer, and lists the consumer
+  E6. only the owning service creates its event types
+  E7. no two microservices share a Docker network
+  E8. no /internal/ route other than /internal/reports/* in any service
+  E9. every event type has a JSON Schema in events/schemas/
+  E10. checkout_web imports no service package
 
 Only `ast`, `re` and PyYAML (already installed with uvicorn[standard]): no new dependency,
 and it runs as tests/unit/test_boundaries.py.
@@ -35,14 +46,9 @@ DB_SERVICES = ("checkout", "inventory")  # the services that own a database
 NO_DB_SERVICES = ("catalog", "analytics")
 
 DB_LIBS = ("sqlalchemy", "asyncpg", "psycopg", "psycopg2")
-RAW_HTTP_MODULES = ("requests", "aiohttp", "urllib.request", "http.client", "socket")
-# Which peers each service may call (contracts/internal-apis.md).
-ALLOWED_PEERS = {
-    "catalog": set(),
-    "checkout": {"catalog", "inventory"},
-    "inventory": {"catalog"},
-    "analytics": {"catalog", "checkout"},
-}
+# E2: nothing a microservice could call a peer with.
+HTTP_MODULES = ("httpx", "requests", "aiohttp", "urllib.request", "urllib3", "http.client", "socket")
+HTTP_DEPENDENCIES = ("httpx", "requests", "aiohttp", "urllib3")
 SQL_MODULES = ("repo.py", "reserve.py", "seed.py")
 
 _TABLE = re.compile(
@@ -108,26 +114,19 @@ def _check_python(root: pathlib.Path) -> list[str]:
                 # Rule 2: no database library in a service that has no database.
                 if svc in NO_DB_SERVICES and any(_is(module, lib) for lib in DB_LIBS):
                     out.append(f"rule 2: {rel}:{line} imports {module} but {svc} has no database")
-                # Rule 5: raw HTTP, sockets.
-                if any(_is(module, raw) for raw in RAW_HTTP_MODULES):
-                    out.append(f"rule 5: {rel}:{line} imports {module}; use checkout_web.client")
+                # E2: no HTTP client library or socket in a microservice.
+                if any(_is(module, http) for http in HTTP_MODULES):
+                    out.append(f"E2: {rel}:{line} imports {module}; services talk through events only")
 
             for node in ast.walk(tree):
-                # Rule 5: constructing a raw httpx client in service code.
-                if (
-                    isinstance(node, ast.Attribute)
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id == "httpx"
-                    and node.attr in {"AsyncClient", "Client", "get", "post", "put", "delete", "request"}
-                ):
-                    out.append(
-                        f"rule 5: {rel}:{node.lineno} uses httpx.{node.attr}; use checkout_web.client"
-                    )
-                # Rule 5: a peer this service may not call.
                 if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+                    # E1: another microservice's address.
                     for peer in _PEER_URL.findall(node.value):
-                        if peer in SERVICES and peer != svc and peer not in ALLOWED_PEERS[svc]:
-                            out.append(f"rule 5: {rel}:{node.lineno} calls {peer}, which {svc} may not")
+                        if peer in SERVICES and peer != svc:
+                            out.append(f"E1: {rel}:{node.lineno} names {peer}'s address ({node.value!r})")
+                    # E8: only /internal/reports/* may exist beside the public routes.
+                    if node.value.startswith("/internal/") and not node.value.startswith("/internal/reports/"):
+                        out.append(f"E8: {rel}:{node.lineno} defines {node.value!r}; only /internal/reports/* is allowed")
 
             # Rule 4: SQL only touches tables in this service's own models.py.
             if svc in DB_SERVICES and path.name in SQL_MODULES:
@@ -154,6 +153,8 @@ def _check_python(root: pathlib.Path) -> list[str]:
         for module, line in _imports(tree):
             if any(_is(module, lib) for lib in DB_LIBS):
                 out.append(f"rule 2: {path.relative_to(root)}:{line} imports {module} (checkout_web is data-free)")
+            if module.split(".")[0].endswith("_service"):
+                out.append(f"E10: {path.relative_to(root)}:{line} imports {module}; checkout_web knows no service")
 
     # Rule 3: the shared data library must be gone, and not imported anywhere.
     if (root / "packages" / "checkout_data").exists():
@@ -213,6 +214,30 @@ def _check_compose(root: pathlib.Path) -> list[str]:
             if host in hosts_used and hosts_used[host] != owner:
                 out.append(f"rule 6: {host} is used by both {hosts_used[host]} and {owner}")
             hosts_used.setdefault(host, owner)
+
+    # E1: no service is told another service's address.
+    for name, svc in services.items():
+        if name not in SERVICES:
+            continue
+        for key, value in _env(svc).items():
+            if key.endswith("DATABASE_URL"):
+                continue
+            for peer in _PEER_URL.findall(value):
+                if peer in SERVICES and peer != name:
+                    out.append(f"E1: compose {name} {key} names {peer}'s address ({value!r})")
+            if key.endswith("_URL") and key.removesuffix("_URL").lower() in SERVICES:
+                out.append(f"E1: compose {name} is given {key}, the address of another service")
+
+    # E7: no two microservices share a network.
+    on_net: dict[str, set[str]] = {}
+    for name, svc in services.items():
+        nets = svc.get("networks") or []
+        for net in nets if isinstance(nets, list) else list(nets):
+            if name in SERVICES:
+                on_net.setdefault(net, set()).add(name)
+    for net, names in sorted(on_net.items()):
+        if len(names) > 1:
+            out.append(f"E7: {', '.join(sorted(names))} share the network {net!r}")
 
     # Rule 7: a database network belongs to one service (plus its database and seed job).
     members: dict[str, set[str]] = {}
@@ -296,13 +321,158 @@ def _check_locks(root: pathlib.Path) -> list[str]:
     return out
 
 
+def _check_dependencies(root: pathlib.Path) -> list[str]:
+    """E2 in the manifests: no HTTP client library is a dependency of a microservice."""
+    out = []
+    for svc in SERVICES:
+        manifest = root / "services" / svc / "pyproject.toml"
+        if manifest.exists():
+            names = {
+                re.split(r"[=<>!~\[\s]", line.strip().strip('",'))[0].lower()
+                for line in manifest.read_text().splitlines()
+                if line.strip().startswith('"')
+            }
+            for dep in sorted(names & set(HTTP_DEPENDENCIES)):
+                out.append(f"E2: services/{svc}/pyproject.toml depends on {dep}")
+        lock = root / "services" / svc / "requirements.lock"
+        if lock.exists():
+            locked = {
+                line.split("==")[0].split("[")[0].strip().lower()
+                for line in lock.read_text().splitlines()
+                if line and not line.startswith(("#", " ", "-"))
+            }
+            for dep in sorted(locked & set(HTTP_DEPENDENCIES)):
+                out.append(f"E2: services/{svc}/requirements.lock ships {dep}")
+    return out
+
+
+_CONST = re.compile(r'^([A-Z][A-Z_]*)\s*=\s*"([^"]+)"\s*$', re.M)
+
+
+def _tuple_names(tree: ast.AST, target: str) -> list[str] | None:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) or isinstance(node, ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == target for t in targets) and isinstance(node.value, ast.Tuple):
+                return [e.id for e in node.value.elts if isinstance(e, ast.Name)]
+    return None
+
+
+def _check_events(root: pathlib.Path) -> list[str]:
+    """E3-E6 and E9: the event topology in code matches events/topics.yaml and the schemas."""
+    manifest_path = root / "events" / "topics.yaml"
+    events_py = root / "packages" / "checkout_web" / "src" / "checkout_web" / "events.py"
+    if not manifest_path.exists() or not events_py.exists():
+        return []
+    import yaml
+
+    out: list[str] = []
+    topics: dict[str, dict] = yaml.safe_load(manifest_path.read_text())["topics"]
+    consts = dict(_CONST.findall(events_py.read_text()))
+    topic_const = {name: value for name, value in consts.items() if value in topics}
+    type_const = {
+        name: value
+        for name, value in consts.items()
+        if re.fullmatch(r"(?:catalog|checkout|inventory|analytics)\.[a-z-]+|dead-letter", value)
+    }
+
+    # E9: every event type has a schema, and the envelope has one.
+    schemas = root / "events" / "schemas"
+    for value in sorted(set(type_const.values())):
+        if not (schemas / f"{value}.json").exists():
+            out.append(f"E9: events/schemas/{value}.json is missing")
+    if not (schemas / "envelope.json").exists():
+        out.append("E9: events/schemas/envelope.json is missing")
+
+    produces: dict[str, set[str]] = {}
+    consumes: dict[str, set[str]] = {}
+    for svc in SERVICES:
+        directory = _service_dir(root, svc)
+        decl = directory / "events.py"
+        if not decl.exists():
+            continue
+        tree = ast.parse(decl.read_text(), str(decl))
+        prod = _tuple_names(tree, "PRODUCES") or []
+        cons = _tuple_names(tree, "CONSUMES") or []
+        produces[svc] = {topic_const[n] for n in prod if n in topic_const}
+        consumes[svc] = {topic_const[n] for n in cons if n in topic_const}
+        for n in prod + cons:
+            if n not in topic_const:
+                out.append(f"E3: {decl.relative_to(root)} lists {n}, which is not a topic in events/topics.yaml")
+
+        declared = produces[svc] | consumes[svc] | {"dead-letters.v1"}
+        for path in _py_files(directory):
+            if path.name == "events.py":
+                continue
+            tree = ast.parse(path.read_text(), str(path))
+            docstrings = _docstrings(tree)
+            for node in ast.walk(tree):
+                name = node.id if isinstance(node, ast.Name) else None
+                if name in topic_const and topic_const[name] not in declared:
+                    out.append(
+                        f"E3: {path.relative_to(root)}:{node.lineno} uses topic {topic_const[name]}, "
+                        f"which {svc}'s events.py does not declare"
+                    )
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value in topics
+                    and id(node) not in docstrings
+                ):
+                    out.append(
+                        f"E3: {path.relative_to(root)}:{node.lineno} writes the topic name {node.value!r} "
+                        "as a literal; use the constant from checkout_web.events"
+                    )
+                # E6: only the owner creates its event types.
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "make_event"
+                    and node.args
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id in type_const
+                ):
+                    etype = type_const[node.args[0].id]
+                    if etype != "dead-letter" and not etype.startswith(f"{svc}."):
+                        out.append(
+                            f"E6: {path.relative_to(root)}:{node.lineno} creates {etype}, "
+                            f"which belongs to {etype.split('.')[0]}"
+                        )
+
+    # E4 / E5: producers and consumers, in the manifest and in the services' own declarations.
+    for topic, spec in sorted(topics.items()):
+        producer = spec.get("producer")
+        if not producer:
+            out.append(f"E5: {topic} has no declared producer")
+            continue
+        claimed = sorted(s_ for s_, tps in produces.items() if topic in tps)
+        if producer == "*":
+            continue
+        if claimed != [producer]:
+            out.append(f"E4: {topic} is owned by {producer} but produced by {claimed or 'nobody'}")
+    for svc, tps in sorted(consumes.items()):
+        for topic in sorted(tps):
+            spec = topics.get(topic)
+            if spec is None or not spec.get("producer"):
+                out.append(f"E5: {svc} consumes {topic}, which has no declared producer")
+            elif svc not in (spec.get("consumers") or []):
+                out.append(f"E5: {svc} consumes {topic} but events/topics.yaml does not list it as a consumer")
+    for topic, spec in sorted(topics.items()):
+        for consumer in spec.get("consumers") or []:
+            if consumer in consumes and topic not in consumes[consumer]:
+                out.append(f"E5: events/topics.yaml lists {consumer} as a consumer of {topic}, but its events.py does not")
+    return out
+
+
 def check(root: pathlib.Path) -> list[str]:
-    """All violations under `root`, each prefixed `rule N:`."""
+    """All violations under `root`, each prefixed `rule N:` or `E<n>:`."""
     return (
         _check_python(root)
         + _check_compose(root)
         + _check_gateway(root)
         + _check_locks(root)
+        + _check_dependencies(root)
+        + _check_events(root)
     )
 
 

@@ -33,8 +33,6 @@ def _database_url() -> str:
 class Settings:
     kafka_bootstrap: str = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
     database_url: str = _database_url()
-    catalog_url: str = os.getenv("CATALOG_URL", "http://catalog:8000")
-    inventory_url: str = os.getenv("INVENTORY_URL", "http://inventory:8000")
     tx_abandon_minutes: int = _int("TX_ABANDON_MINUTES", 5)
     # Completion saga (contracts/completion-saga.md): a stuck completion becomes eligible
     # for recovery after the lease, and the whole synchronous reserve gets one budget.

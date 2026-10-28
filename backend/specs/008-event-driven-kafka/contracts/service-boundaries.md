@@ -18,5 +18,11 @@ shared data-access code, and so on) and adds these:
 | E10 | The shared package holds no data access and no business events | `checkout_web` imports no database library and defines only the envelope and the bus |
 
 Shared code allowed in `checkout_web` (listed explicitly, per 007 FR-005): errors, request
-parsing, app factory, `/healthz`, money helpers, **event envelope, topic-name constants, `Bus`
-and `consumer_loop`**.
+parsing, app factory, `/healthz`, money helpers, **event envelope and topic-name constants
+(`events`), `Bus` with its Kafka and in-memory implementations (`bus`), `consumer_loop`, the
+generic catalog-topic reader (`snapshot`) and task shutdown (`lifecycle`)**. None of it holds a
+schema, a table or a query; each service owns its own outbox tables and relay.
+
+Rule 5 of spec 007 (outbound HTTP only through `checkout_web.client`, only to allowed peers) no
+longer exists: the client is deleted and E1/E2 forbid any service-to-service call. The tools
+image (operator checks) keeps `httpx` and is not a microservice.

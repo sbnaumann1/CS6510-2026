@@ -17,7 +17,6 @@ from checkout_service import (
     api,
     catalog_snapshot,
     eventbus,
-    internal_api,
     internal_reports,
     outbox,
     recovery,
@@ -107,7 +106,7 @@ async def _sweep_loop() -> None:
 
 app = create_service_app(
     "checkout",
-    [api.router, internal_api.router, internal_reports.router],
+    [api.router, internal_reports.router],
     ping,
     lifespan,
     readiness=readiness,

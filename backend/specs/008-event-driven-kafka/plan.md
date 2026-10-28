@@ -112,7 +112,9 @@ backend/
 │   └── src/checkout_web/
 │       ├── events.py                # envelope, event types, topic constants, (de)serialization
 │       ├── bus.py                   # Bus protocol; KafkaBus (aiokafka); MemoryBus with fault hooks
-│       └── consumer_loop.py         # poll → handle → commit-after-success, retries, dead-letter
+│       ├── consumer_loop.py         # poll → handle → commit-after-success, retries, dead-letter
+│       ├── snapshot.py              # generic reader of catalog.items.v1 (ready after the marker)
+│       └── lifecycle.py             # cancel_and_wait: shutdown that survives a lost cancellation
 ├── services/
 │   ├── catalog/src/catalog_service/
 │   │   ├── …                        # api, store, seed unchanged

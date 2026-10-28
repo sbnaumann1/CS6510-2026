@@ -6,7 +6,6 @@ requires-python = ">=3.11"
 dependencies = [
     "checkout-web==0.8.0",
     "python-dotenv==1.0.0",
-    "httpx==0.25.2",
     "orjson==3.9.10",
     "aiokafka==0.14.0",
 ]
