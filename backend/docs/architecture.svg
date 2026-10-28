@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 700" width="1040" height="700" font-family="Helvetica, Arial, sans-serif">
+  <title>Self-checkout backend: four microservices and a Kafka event broker</title>
+  <desc>Shopper to API gateway to four microservices with private stores. Services never call one another: every interaction is an event on a Kafka broker with five topics.</desc>
+  <defs>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2b6cb0"/></marker>
+    <marker id="a-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c05621"/></marker>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2f855a"/></marker>
+    <marker id="a-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker>
+    <marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9b2c2c"/></marker>
+  </defs>
+
+  <rect width="1040" height="700" fill="#ffffff"/>
+  <text x="20" y="28" font-size="20" font-weight="bold" fill="#1a202c">Self-checkout backend: four microservices, one event broker</text>
+  <text x="20" y="48" font-size="12" fill="#4a5568">No service calls another. Every service-to-service interaction is an event on Kafka; the only HTTP is shopper to gateway to the owning service.</text>
+
+  <!-- Load client and gateway -->
+  <rect x="20" y="290" width="110" height="56" rx="8" fill="#edf2f7" stroke="#4a5568"/>
+  <text x="75" y="315" font-size="13" text-anchor="middle" fill="#1a202c">Load client</text>
+  <text x="75" y="332" font-size="11" text-anchor="middle" fill="#4a5568">/ shopper</text>
+
+  <rect x="170" y="260" width="130" height="116" rx="8" fill="#edf2f7" stroke="#4a5568"/>
+  <text x="235" y="286" font-size="14" font-weight="bold" text-anchor="middle" fill="#1a202c">API Gateway</text>
+  <text x="235" y="304" font-size="11" text-anchor="middle" fill="#4a5568">nginx, routes by path</text>
+  <text x="235" y="322" font-size="10" text-anchor="middle" fill="#4a5568">/items  /transactions*</text>
+  <text x="235" y="336" font-size="10" text-anchor="middle" fill="#4a5568">/inventory/*  /analytics/*</text>
+  <text x="235" y="354" font-size="10" text-anchor="middle" fill="#9b2c2c">blocks /internal/</text>
+  <line x1="130" y1="318" x2="170" y2="318" stroke="#4a5568" stroke-width="2" marker-end="url(#a-grey)"/>
+  <text x="150" y="310" font-size="9" text-anchor="middle" fill="#4a5568">HTTP</text>
+
+  <!-- Services -->
+  <g>
+    <rect x="360" y="70" width="210" height="96" rx="8" fill="#ebf8ff" stroke="#2b6cb0" stroke-width="2"/>
+    <text x="465" y="96" font-size="15" font-weight="bold" text-anchor="middle" fill="#1a365d">Catalog</text>
+    <text x="465" y="114" font-size="11" text-anchor="middle" fill="#2c5282">GET /items</text>
+    <text x="465" y="140" font-size="11" text-anchor="middle" fill="#2c5282">store: catalog.csv (read-only file)</text>
+    <text x="465" y="156" font-size="10" text-anchor="middle" fill="#2c5282">publisher: items + marker at startup</text>
+  </g>
+  <g>
+    <rect x="360" y="210" width="210" height="110" rx="8" fill="#fffaf0" stroke="#c05621" stroke-width="2"/>
+    <text x="465" y="236" font-size="15" font-weight="bold" text-anchor="middle" fill="#7b341e">Checkout</text>
+    <text x="465" y="254" font-size="11" text-anchor="middle" fill="#9c4221">/transactions*  (completion saga)</text>
+    <text x="465" y="278" font-size="11" text-anchor="middle" fill="#9c4221">store: checkout-db (PostgreSQL)</text>
+    <text x="465" y="294" font-size="10" text-anchor="middle" fill="#9c4221">outbox + scan relay + reply waiters</text>
+    <text x="465" y="310" font-size="10" text-anchor="middle" fill="#9c4221">price snapshot from catalog events</text>
+  </g>
+  <g>
+    <rect x="360" y="364" width="210" height="110" rx="8" fill="#f0fff4" stroke="#2f855a" stroke-width="2"/>
+    <text x="465" y="390" font-size="15" font-weight="bold" text-anchor="middle" fill="#22543d">Inventory</text>
+    <text x="465" y="408" font-size="11" text-anchor="middle" fill="#276749">GET /inventory/low-stock</text>
+    <text x="465" y="432" font-size="11" text-anchor="middle" fill="#276749">store: inventory-db (PostgreSQL)</text>
+    <text x="465" y="448" font-size="10" text-anchor="middle" fill="#276749">outbox + request consumer</text>
+    <text x="465" y="464" font-size="10" text-anchor="middle" fill="#276749">name snapshot from catalog events</text>
+  </g>
+  <g>
+    <rect x="360" y="518" width="210" height="96" rx="8" fill="#faf5ff" stroke="#6b46c1" stroke-width="2"/>
+    <text x="465" y="544" font-size="15" font-weight="bold" text-anchor="middle" fill="#44337a">Analytics</text>
+    <text x="465" y="562" font-size="11" text-anchor="middle" fill="#553c9a">GET /analytics/popular-items</text>
+    <text x="465" y="586" font-size="11" text-anchor="middle" fill="#553c9a">store: none (in-memory window)</text>
+    <text x="465" y="602" font-size="10" text-anchor="middle" fill="#553c9a">rebuilt from the scan topic's tail</text>
+  </g>
+
+  <!-- Gateway to services (HTTP) -->
+  <g stroke="#4a5568" stroke-width="2" fill="none" marker-end="url(#a-grey)">
+    <path d="M300,300 C330,300 330,118 360,118"/>
+    <path d="M300,312 C330,312 330,265 360,265"/>
+    <path d="M300,324 C330,324 330,419 360,419"/>
+    <path d="M300,336 C330,336 330,566 360,566"/>
+  </g>
+
+  <!-- Kafka -->
+  <rect x="700" y="70" width="320" height="544" rx="12" fill="#f7fafc" stroke="#1a202c" stroke-width="2.5"/>
+  <text x="860" y="96" font-size="16" font-weight="bold" text-anchor="middle" fill="#1a202c">Kafka event broker</text>
+  <text x="860" y="113" font-size="10" text-anchor="middle" fill="#4a5568">one broker, KRaft; services reach it only on their own bus_ network</text>
+
+  <rect x="720" y="130" width="280" height="62" rx="8" fill="#ebf8ff" stroke="#2b6cb0"/>
+  <text x="860" y="152" font-size="13" font-weight="bold" text-anchor="middle" fill="#1a365d">catalog.items.v1</text>
+  <text x="860" y="168" font-size="10" text-anchor="middle" fill="#2c5282">compacted, key = SKU</text>
+  <text x="860" y="182" font-size="10" text-anchor="middle" fill="#2c5282">items once at startup, then a marker</text>
+
+  <rect x="720" y="236" width="280" height="62" rx="8" fill="#fffaf0" stroke="#c05621"/>
+  <text x="860" y="258" font-size="13" font-weight="bold" text-anchor="middle" fill="#7b341e">checkout.completions.v1</text>
+  <text x="860" y="274" font-size="10" text-anchor="middle" fill="#9c4221">key = transaction id</text>
+  <text x="860" y="288" font-size="10" text-anchor="middle" fill="#9c4221">stock reservation / release requested</text>
+
+  <rect x="720" y="342" width="280" height="62" rx="8" fill="#f0fff4" stroke="#2f855a"/>
+  <text x="860" y="364" font-size="13" font-weight="bold" text-anchor="middle" fill="#22543d">inventory.stock.v1</text>
+  <text x="860" y="380" font-size="10" text-anchor="middle" fill="#276749">key = transaction id</text>
+  <text x="860" y="394" font-size="10" text-anchor="middle" fill="#276749">reserved / rejected / released / refused</text>
+
+  <rect x="720" y="448" width="280" height="62" rx="8" fill="#faf5ff" stroke="#6b46c1"/>
+  <text x="860" y="470" font-size="13" font-weight="bold" text-anchor="middle" fill="#44337a">checkout.scans.v1</text>
+  <text x="860" y="486" font-size="10" text-anchor="middle" fill="#553c9a">one partition, scan-id order</text>
+  <text x="860" y="500" font-size="10" text-anchor="middle" fill="#553c9a">scan-recorded (via the relay)</text>
+
+  <rect x="720" y="540" width="280" height="56" rx="8" fill="#fff5f5" stroke="#9b2c2c"/>
+  <text x="860" y="562" font-size="13" font-weight="bold" text-anchor="middle" fill="#742a2a">dead-letters.v1</text>
+  <text x="860" y="578" font-size="10" text-anchor="middle" fill="#9b2c2c">an event that failed five times</text>
+
+  <!-- Catalog flows (blue): producer then snapshot consumers -->
+  <g stroke="#2b6cb0" stroke-width="2" fill="none">
+    <path d="M570,118 C640,118 650,150 720,150" marker-end="url(#a-blue)"/>
+    <path d="M720,176 C650,176 640,236 570,236" marker-end="url(#a-blue)" stroke-dasharray="6 3"/>
+    <path d="M720,184 C640,200 640,388 570,388" marker-end="url(#a-blue)" stroke-dasharray="6 3"/>
+    <path d="M720,190 C620,230 620,542 570,542" marker-end="url(#a-blue)" stroke-dasharray="6 3"/>
+  </g>
+  <!-- Completion flow (orange): request, then reply -->
+  <g stroke="#c05621" stroke-width="2.5" fill="none">
+    <path d="M570,262 C640,262 650,262 720,262" marker-end="url(#a-orange)"/>
+    <path d="M720,278 C650,300 640,408 570,408" marker-end="url(#a-orange)"/>
+    <path d="M570,425 C640,425 650,372 720,372" marker-end="url(#a-orange)"/>
+    <path d="M720,392 C650,330 640,296 570,296" marker-end="url(#a-orange)"/>
+  </g>
+  <!-- Scan flow (green): relay, then Analytics -->
+  <g stroke="#2f855a" stroke-width="2" fill="none">
+    <path d="M570,310 C660,330 650,470 720,474" marker-end="url(#a-green)"/>
+    <path d="M720,492 C650,500 640,566 570,566" marker-end="url(#a-green)"/>
+  </g>
+  <!-- Dead letters (red, dotted) -->
+  <g stroke="#9b2c2c" stroke-width="1.5" fill="none" stroke-dasharray="3 3">
+    <path d="M570,326 C600,560 650,566 720,566" marker-end="url(#a-red)"/>
+    <path d="M570,470 C640,520 660,568 720,568" marker-end="url(#a-red)"/>
+    <path d="M570,606 C640,600 660,580 720,576" marker-end="url(#a-red)"/>
+  </g>
+
+  <!-- Legend -->
+  <g font-size="11" fill="#2d3748">
+    <text x="20" y="500" font-size="12" font-weight="bold">Legend</text>
+    <line x1="20" y1="516" x2="60" y2="516" stroke="#4a5568" stroke-width="2" marker-end="url(#a-grey)"/><text x="68" y="520">HTTP (the public contract)</text>
+    <line x1="20" y1="536" x2="60" y2="536" stroke="#2b6cb0" stroke-width="2" marker-end="url(#a-blue)"/><text x="68" y="540">catalog events (dashed: snapshots)</text>
+    <line x1="20" y1="556" x2="60" y2="556" stroke="#c05621" stroke-width="2.5" marker-end="url(#a-orange)"/><text x="68" y="560">completion: request, then reply</text>
+    <line x1="20" y1="576" x2="60" y2="576" stroke="#2f855a" stroke-width="2" marker-end="url(#a-green)"/><text x="68" y="580">scan events (relay to Analytics)</text>
+    <line x1="20" y1="596" x2="60" y2="596" stroke="#9b2c2c" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#a-red)"/><text x="68" y="600">poison events (every consumer)</text>
+    <text x="20" y="634" font-size="11" fill="#4a5568">There is no arrow between two services that does not pass through Kafka:</text>
+    <text x="20" y="650" font-size="11" fill="#4a5568">no two services share a Docker network, so a service cannot resolve a peer.</text>
+  </g>
+</svg>

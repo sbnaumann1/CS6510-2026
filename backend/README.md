@@ -268,7 +268,24 @@ every scan;** and Analytics has read every scan.
 
 ### Graded reports
 
-RESULTS_TABLE
+| Report | Config | tx/s | items/s | COMPLETE err % | Invariant |
+| --- | --- | --- | --- | --- | --- |
+| [`report-20261027-220244.json`](../load-client/reports/008-event-driven-kafka/report-20261027-220244.json) | default (`java -cp out Main`; 10 stations / 60 s) | 166.2 | 2 554 | 31.7 % | PASS |
+| [`report-20261027-220513.json`](../load-client/reports/008-event-driven-kafka/report-20261027-220513.json) | stress (`--stations=100 --duration=120`) | 160.2 | 3 858 | 56.4 % | PASS |
+
+Every error is a contract-defined `409 INSUFFICIENT_STOCK` once hot SKUs sell out (the logs show
+exactly as many Inventory `stock-rejected` replies as errors); there were no `5xx` responses, no
+timeouts, no re-publishes, no dead letters and no tracebacks.
+
+**Against Week 7: 83 % (default) and 82 % (stress)**, above the 70 % the spec set. Scans and
+starts are unchanged; a completion costs about two broker hops more (21.6 ms against 10.2 ms
+at 10 stations), and at 100 stations Checkout's wait for the reply is mostly queueing for
+Inventory's consumers (Inventory's own work is 10–20 ms of the ~150 ms). The breakdown, the
+Week 7 comparison and the drills (including the broker-outage run that found and fixed a real
+producer defect) are in
+[`../load-client/reports/008-event-driven-kafka/README.md`](../load-client/reports/008-event-driven-kafka/README.md).
+As in earlier weeks, results are not directly comparable to the native runs of Weeks 1–4: the
+whole system runs inside Docker Desktop's VM.
 
 ## Inspect
 
@@ -374,7 +391,6 @@ scripts/
   check_crash_recovery.sh   kill Checkout, then Inventory, under load; the stores must agree
   check_broker_outage.sh    stop Kafka under load; nothing lost, no dead letters
   trace_request.sh      one request id across the logs and the events
-  render_diagram.sh     docs/architecture.svg from the Mermaid source
   create_topics.py      events/create-topics.sh from events/topics.yaml
   step_timings.py       per-step timings from the logs
   lock_services.sh      regenerate the per-image requirements.lock files

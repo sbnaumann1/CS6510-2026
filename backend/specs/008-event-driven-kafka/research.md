@@ -263,3 +263,30 @@ repo URL) with a rendered SVG committed beside it, linked from the README
 
 **Rationale**: the grader opens one URL; a Mermaid block renders in place and the SVG is a fallback
 if rendering is unavailable.
+
+## Implementation notes (2026-10-27)
+
+What the build taught, and where it departed from the plan above. Each departure was made to
+keep a requirement true, not to reduce scope.
+
+| Topic | Plan | As built | Why |
+| --- | --- | --- | --- |
+| Versions | Kafka 3.9, aiokafka | `apache/kafka:3.9.1` (KRaft), `aiokafka==0.14.0` | newest releases at least two weeks old |
+| Producer (R1) | idempotent, `acks=all` | `acks=all`, **not idempotent**, plus the bus replaces a producer after a fatal producer error | `scripts/check_broker_outage.sh` found that aiokafka's idempotent producer wedges permanently with `OutOfOrderSequenceNumber` after a broker restart under load, stalling the scan relay. Delivery is at-least-once by design and every consumer is idempotent, so idempotence added nothing and cost the recovery |
+| Reply wait (R5) | wait 4 s; release 2 s | **3 s** and **1.5 s** (1.125 / 1.125 / 0.75 s around two re-publishes) | SC-009 wants dependent endpoints to answer within 5 s: 3 + 1.5 = 4.5 s. The publish also runs *inside* each wait: a down broker made each publish block for its own timeout *before* the wait, so a completion with Kafka down took 15 s |
+| Analytics offsets (R8) | commit group offsets | none: an unshared reader seeks to `end − 2 × window` on every start | the window is rebuilt from the tail each time, so a committed offset could only be wrong |
+| Snapshot code | one per service | one generic `checkout_web.snapshot.TopicSnapshot`, thin wrappers per service | the three snapshots differ only in what they keep per SKU |
+| Task shutdown | `task.cancel()` | `checkout_web.lifecycle.cancel_and_wait` | on Python 3.11 `asyncio.wait_for` can swallow a cancellation, so a polling consumer kept running and shutdown (and test teardown) hung. The in-memory bus and the reply wait now use `asyncio.wait`, and shutdown re-sends the cancellation until the task is done |
+| `REJECTED` (R6) | recorded | recorded, `lines` holds the short SKUs | so a repeated request replays the same refusal |
+| Malformed events (R9) | five tries | dead-lettered at once | retrying bytes cannot fix them |
+| Scan-log reset | relay publishes `scan-log-reset` | same; the seed does **not** touch `relay_state`, a fresh database initialises silently | otherwise a reset was invisible to a running relay, or a first start announced a reset nobody was waiting for |
+| Test hooks | `MemoryBus` fault hooks | plus `publish_raw` (poison records), `attempts` (publish counts), `Stack.stop_service/start_service` (a service stopped and restarted on a shared bus) | the failure tests need to stop a service and keep its backlog |
+| Diagram | Mermaid rendered to SVG | Mermaid in the markdown, SVG drawn by hand | the Mermaid CLI needs a package download the sandbox refused |
+
+**Measured throughput (R14).** Default 166.2 tx/s and stress 160.2 tx/s, which is **83 % and
+82 %** of Week 7's 200.5 and 196.2 (target ≥ 70 %). Completion latency rose from 10.2 to
+21.6 ms (default) and 80.0 to 183.3 ms (stress). Inventory's own handling is 10–20 ms; the rest
+is queueing for its consumers (two workers × six concurrent handlers against 100 stations) and
+two broker hops. More consumer concurrency is the first tuning to try. Detail:
+`load-client/reports/008-event-driven-kafka/README.md`.
+

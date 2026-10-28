@@ -8,7 +8,7 @@ unchanged. (Spec: [`specs/008-event-driven-kafka`](../specs/008-event-driven-kaf
 
 ![Architecture diagram](architecture.svg)
 
-*The same diagram as Mermaid, which GitHub renders in place (the SVG above is a rendered copy):*
+*The same architecture as Mermaid, which GitHub renders in place (the SVG above is drawn by hand and kept in step with it):*
 
 ```mermaid
 flowchart LR
