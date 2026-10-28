@@ -181,7 +181,7 @@ between COMMIT and send); partition scans by transaction (R2).
 
 ## R9. Consumer failure handling: retry, then dead-letter
 
-**Decision**: a handler that raises is retried with backoff (5 attempts, 0.2 s doubling). After the
+**Decision**: a handler that raises is retried with backoff (5 attempts, 0.2 s doubling; a record that cannot even be decoded is dead-lettered at once, since retrying bytes cannot fix them). After the
 last attempt the event, its error and its origin are published to `dead-letters.v1` and the offset
 is committed so later events proceed. Transient infrastructure errors (database or broker
 unreachable) are **not** counted toward dead-lettering: the consumer pauses and retries until the

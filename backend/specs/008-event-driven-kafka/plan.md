@@ -57,7 +57,7 @@ automated drill is "can a container resolve or reach a peer?".
 
 **Performance Goals**: stress run (100 stations, 120 s) reported beside 007's 196.2 tx/s and default run beside 200.5 tx/s; target ≥ 70 % of 007, explain any shortfall (SC-010). Analytics catches up within 30 s of recovery (SC-008).
 
-**Constraints**: contract unchanged; stock never negative; no service-to-service HTTP; every consumer idempotent; every awaited outcome has a deadline (4 s); at most one hot-SKU lock hold per statement (spec 006 finding, unchanged)
+**Constraints**: contract unchanged; stock never negative; no service-to-service HTTP; every consumer idempotent; every awaited outcome has a deadline (3 s, plus 1.5 s to confirm a release); at most one hot-SKU lock hold per statement (spec 006 finding, unchanged)
 
 **Scale/Scope**: 4 services, 1 broker, 5 topics, 6 event types, 2 databases; ~2 000 items; 100 stations
 

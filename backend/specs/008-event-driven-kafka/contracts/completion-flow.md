@@ -111,9 +111,9 @@ event reaches the broker; recovery makes sure every stuck completion reaches an 
 | Step | Limit |
 | --- | --- |
 | Step 1 / 6 local transactions | database statement timeout (5 s) |
-| Wait for an outcome | 1.5 s, re-publish, 1.5 s, re-publish, 1.0 s: **4 s total** |
-| Release after a silent reserve | one more wait of 2 s |
-| Whole synchronous `complete` | ≤ 6 s before `503`, as in 007 |
+| Wait for an outcome | 1.125 s, re-publish, 1.125 s, re-publish, 0.75 s: **3 s total** (`RESERVE_BUDGET_S`) |
+| Release after a silent reserve | one more wait of 1.5 s (`RELEASE_WAIT_S`) |
+| Whole synchronous `complete` | ≤ 4.5 s before `503`, inside SC-009's 5 s |
 | Outbox sweeper | republishes rows unpublished after 2 s, every 1 s |
 | Recovery lease | 10 s |
 

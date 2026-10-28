@@ -48,6 +48,8 @@ log = logging.getLogger("inventory")
 PRODUCER = "inventory"
 GROUP = "inventory"
 CONCURRENCY = 6  # below the connection pool, leaving room for the report endpoint
+MAX_ATTEMPTS = 5  # a handler that keeps failing is dead-lettered after this many tries
+BACKOFF_S = 0.2  # doubling between tries
 
 _consumer = None
 
@@ -148,4 +150,7 @@ async def run(bus: Bus) -> None:
     """Consume `checkout.completions.v1` in the shared group `inventory`."""
     global _consumer
     _consumer = bus.consumer(CHECKOUT_COMPLETIONS, group=GROUP)
-    await run_consumer(_consumer, handle, name=GROUP, bus=bus, concurrency=CONCURRENCY)
+    await run_consumer(
+        _consumer, handle, name=GROUP, bus=bus, concurrency=CONCURRENCY,
+        max_attempts=MAX_ATTEMPTS, backoff_s=BACKOFF_S,
+    )

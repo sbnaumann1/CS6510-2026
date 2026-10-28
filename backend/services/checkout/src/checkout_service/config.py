@@ -34,13 +34,15 @@ class Settings:
     kafka_bootstrap: str = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
     database_url: str = _database_url()
     tx_abandon_minutes: int = _int("TX_ABANDON_MINUTES", 5)
-    # Completion saga (contracts/completion-saga.md): a stuck completion becomes eligible
+    # Completion saga (completion-flow.md): the reply to a reservation request is awaited for
+    # `reserve_budget_s` and a release for `release_wait_s`, so a dependent request answers within
+    # 3 + 1.5 = 4.5 s even when Inventory is down (SC-009: 5 s). A stuck completion becomes eligible
     # for recovery after the lease, and the whole synchronous reserve gets one budget.
     recovery_lease_s: float = _float("RECOVERY_LEASE_S", 10.0)
     recovery_interval_s: float = _float("RECOVERY_INTERVAL_S", 2.0)
-    reserve_budget_s: float = _float("RESERVE_BUDGET_S", 4.0)
+    reserve_budget_s: float = _float("RESERVE_BUDGET_S", 3.0)
     # How long a release request waits for Inventory's confirmation (completion-flow.md).
-    release_wait_s: float = _float("RELEASE_WAIT_S", 2.0)
+    release_wait_s: float = _float("RELEASE_WAIT_S", 1.5)
     # Scan relay (research R8): a missing scan id is a permanent gap only after this grace.
     relay_gap_grace_ms: int = _int("RELAY_GAP_GRACE_MS", 1000)
     # Keep workers x pool below this database's max_connections (compose-topology.md).

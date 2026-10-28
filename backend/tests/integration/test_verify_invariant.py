@@ -90,3 +90,40 @@ async def test_fails_when_analytics_has_not_read_every_scan(client, stack, analy
 @pytest.mark.parametrize("path", ["/internal/reports/stock", "/internal/reports/cursor"])
 async def test_reports_are_not_reachable_through_the_gateway(client, path):
     assert (await client.get(path)).status_code == 404
+
+
+async def test_fails_when_an_outbox_row_is_still_unpublished(client, stack, poll_analytics):
+    await basket(client, {"SKU-000001": 2})
+    await poll_analytics()
+    sold, scans, stock, cursor = await reports(stack)
+    assert verify.check(sold, scans, stock, cursor)[0], "a healthy system passes"
+
+    ok, lines = verify.check(sold, {**scans, "unpublishedOutbox": 3}, stock, cursor)
+    assert not ok and any("Checkout has 3 outbox row(s)" in line for line in lines)
+    ok, lines = verify.check(sold, scans, {**stock, "unpublishedOutbox": 1}, cursor)
+    assert not ok and any("Inventory has 1 outbox row(s)" in line for line in lines)
+
+
+async def test_fails_when_the_relay_has_not_published_every_scan(client, stack, poll_analytics):
+    await basket(client, {"SKU-000001": 3})
+    await poll_analytics()
+    sold, scans, stock, cursor = await reports(stack)
+    assert scans["relayPosition"] == scans["maxScanId"] == 3
+
+    ok, lines = verify.check(sold, {**scans, "relayPosition": 1}, stock, cursor)
+    assert not ok and any("scan relay has published to scan 1" in line for line in lines)
+
+
+async def test_the_reports_show_a_stuck_outbox_row(client, stack):
+    from sqlalchemy import text as sql
+
+    from checkout_service import repo, stock_events
+    from checkout_service.db import SessionLocal
+    from checkout_web import events as ev
+
+    async with SessionLocal() as s:
+        async with s.begin():
+            await repo.insert_outbox(s, ev.CHECKOUT_COMPLETIONS, "tx-1", stock_events.release_request("tx-1", 1))
+            await s.execute(sql("UPDATE outbox SET created_at = now() - interval '1 minute'"))
+    _, scans, _, _ = await reports(stack)
+    assert scans["unpublishedOutbox"] == 1

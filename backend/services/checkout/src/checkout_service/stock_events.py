@@ -51,7 +51,7 @@ PRODUCER = "checkout"
 _RESERVE_REPLIES = frozenset({STOCK_RESERVED, STOCK_REJECTED, RESERVATION_REFUSED})
 _RELEASE_REPLIES = frozenset({STOCK_RELEASED})
 # How the reserve budget is split across the first request and its two re-publishes
-# (completion-flow.md "Timing budget": 1.5 s, 1.5 s, 1.0 s of 4 s).
+# (completion-flow.md "Timing budget": 3 s in all, so a refusal comes within 5 s, SC-009).
 _WAIT_SHARES = (0.375, 0.375, 0.25)
 
 
@@ -166,35 +166,47 @@ class StockEvents:
         entry = (accepts, fut)
         self._waiters.setdefault(key, []).append(entry)
         t0 = time.monotonic()
+        publishes: list[asyncio.Task] = []
+        replied = False
         try:
             for attempt, wait in enumerate(waits):
+                # The publish runs *inside* the wait, not before it: a broker that is down makes a
+                # publish block for its own timeout, and that must not stretch the shopper's
+                # deadline (SC-009). Attempt 0 is the outbox fast path (the request is already
+                # committed, so a failed publish is the sweeper's to deliver); later attempts
+                # re-publish the same request, which Inventory answers from its record.
                 if attempt == 0:
-                    # Fast path: the request is already committed in the outbox, so a failed
-                    # publish is the sweeper's to deliver. We still wait: it may beat the budget.
-                    await outbox.publish_now(CHECKOUT_COMPLETIONS, public_id, event)
+                    publishes.append(asyncio.create_task(outbox.publish_now(CHECKOUT_COMPLETIONS, public_id, event)))
                 else:
-                    try:
-                        await self._bus.publish(CHECKOUT_COMPLETIONS, event, key=public_id)
-                        log_step(step, outcome="republished", tx=public_id, attempt=attempt)
-                    except Transient:
-                        pass
+                    publishes.append(asyncio.create_task(self._republish(public_id, event, step, attempt)))
                 # asyncio.wait, not wait_for: it neither swallows a cancellation nor cancels
                 # the future on timeout, so the same future serves the next, longer wait.
                 done, _ = await asyncio.wait({fut}, timeout=wait)
                 if not done:
                     continue
                 reply = fut.result()
+                replied = True  # publishes still finishing (marking the outbox row) are left to finish
                 log_step("await", outcome="ok", tx=public_id, reply=reply.type,
                          elapsed_ms=(time.monotonic() - t0) * 1000)
                 return reply
             log_step("await", outcome="timeout", tx=public_id, elapsed_ms=(time.monotonic() - t0) * 1000)
             raise UpstreamUnavailable("inventory", f"no reply to the {step} request in time")
         finally:
+            if not replied:
+                for task in publishes:
+                    task.cancel()  # a publish still blocked on a dead broker must not outlive the request
             waiting = self._waiters.get(key, [])
             if entry in waiting:
                 waiting.remove(entry)
             if not waiting:
                 self._waiters.pop(key, None)
+
+    async def _republish(self, public_id: str, event: Event, step: str, attempt: int) -> None:
+        try:
+            await self._bus.publish(CHECKOUT_COMPLETIONS, event, key=public_id)
+            log_step(step, outcome="republished", tx=public_id, attempt=attempt)
+        except Transient:
+            pass
 
 
 _client: StockEvents | None = None

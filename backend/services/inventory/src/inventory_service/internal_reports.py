@@ -18,6 +18,7 @@ async def stock(session: AsyncSession = Depends(get_session)) -> Response:
     adjustments = await repo.adjustments(session)
     return ORJSONResponse(
         content={
+            "unpublishedOutbox": await repo.unpublished_count(session),
             "stock": [
                 {"sku": r.sku, "initial": r.initial_stock, "current": r.current_stock}
                 for r in rows

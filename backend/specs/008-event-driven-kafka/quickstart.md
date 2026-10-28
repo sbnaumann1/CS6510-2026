@@ -22,7 +22,8 @@ docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafk
 
 ```bash
 uv run pytest tests/contract tests/integration -q        # in-process, MemoryBus
-BASE_URL=http://localhost:8080 uv run pytest tests/contract -q   # against the running gateway
+# against the running gateway (use the test stack: docker compose -f compose.yaml -f compose.test.yaml up -d --build --wait)
+GATEWAY_URL=http://localhost:8080 uv run pytest tests/contract -q
 ```
 
 **Expect**: all pass, with no assertion changes from 007.
@@ -31,8 +32,8 @@ BASE_URL=http://localhost:8080 uv run pytest tests/contract -q   # against the r
 
 ```bash
 uv run python scripts/check_boundaries.py                # E1–E10 plus 007's rules
-./scripts/check_isolation.sh                             # no container resolves a peer service
-./scripts/check_no_peer_calls.sh                         # full contract flow with only the bus path left
+./scripts/check_isolation.sh                             # no container resolves a peer service; all reach Kafka
+./scripts/check_no_peer_calls.sh                         # a full workload through the gateway; no peer connection
 ```
 
 **Expect**: zero violations; every public endpoint still works.
@@ -50,13 +51,15 @@ uv run python scripts/check_boundaries.py                # E1–E10 plus 007's r
 
 ```bash
 uv run pytest tests/failure -q                           # duplicates, drops, delays, reorders, crash before commit
-BROKER_TESTS=1 uv run pytest tests/broker -q             # real Kafka: compaction, keys, DLQ, replay
-./scripts/check_independence.sh                          # stop each service in turn
-./scripts/check_broker_outage.sh                         # stop Kafka under load, restart
+./scripts/check_independence.sh                          # stop each service (and Kafka) in turn; needs a fresh stack
 ./scripts/check_crash_recovery.sh                        # kill Checkout and Inventory under load
+./scripts/check_broker_outage.sh                         # stop Kafka under load, restart
+# the real-broker subset: keep only the broker (the in-process services join the same consumer groups)
+docker compose stop gateway checkout inventory analytics catalog
+BROKER_TESTS=1 uv run pytest tests/broker -q             # topic config, keys, DLQ, replay on real Kafka
 ```
 
-**Expect**: after every drill `uv run python scripts/verify_invariant.py` reports: stock sold equals
+**Expect**: after every drill `uv run python scripts/verify_invariant.py` (or the `tools` container the scripts run) reports: stock sold equals
 units scanned in completed transactions, no negative stock, no transaction stuck, no outbox row
 unpublished, Analytics has consumed every scan.
 

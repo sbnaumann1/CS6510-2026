@@ -123,7 +123,11 @@ class KafkaBus:
                 bootstrap_servers=self._bootstrap,
                 client_id=self._client_id,
                 acks="all",
-                enable_idempotence=True,
+                # Not idempotent, on purpose. Delivery is at-least-once by design (every consumer
+                # is idempotent), and aiokafka's idempotent producer wedges for good with
+                # OutOfOrderSequenceNumber after the broker restarts under load (found by
+                # scripts/check_broker_outage.sh). `_reset_producer` is the safety net.
+                enable_idempotence=False,
                 linger_ms=2,
                 request_timeout_ms=5000,
             )
@@ -145,6 +149,25 @@ class KafkaBus:
     def ready(self) -> bool:
         return self._producer is not None
 
+    # Errors after which a producer can never send again: it must be replaced.
+    _FATAL = frozenset({
+        "OutOfOrderSequenceNumber", "DuplicateSequenceNumber", "UnknownProducerId",
+        "InvalidProducerEpoch", "InvalidProducerIdMapping", "ProducerFenced", "ProducerClosed",
+    })
+
+    def _reset_if_fatal(self, exc: BaseException) -> None:
+        if type(exc).__name__ in self._FATAL:
+            self._reset_producer(exc)
+
+    def _reset_producer(self, why: BaseException) -> None:
+        """Throw the producer away and connect a fresh one (in the background)."""
+        old, self._producer = self._producer, None
+        if old is None or self._connector is None:
+            return
+        log.warning("replacing the kafka producer after %r", why)
+        asyncio.create_task(_quiet(old.stop()))
+        self._connector = asyncio.create_task(self._connect_forever(), name="kafka-producer")
+
     async def publish(self, topic: str, event: Event, key: str | None = None) -> None:
         producer = self._producer
         if producer is None:
@@ -161,6 +184,7 @@ class KafkaBus:
                 self._publish_timeout_s,
             )
         except Exception as exc:  # KafkaError, timeout, connection loss
+            self._reset_if_fatal(exc)
             raise BrokerUnavailable(f"publish to {topic} failed: {exc!r}") from exc
 
     async def publish_batch(self, topic: str, items: list[tuple[Event, str | None]]) -> None:
@@ -182,6 +206,7 @@ class KafkaBus:
                 )
             await asyncio.wait_for(asyncio.gather(*futures), self._publish_timeout_s + len(items) / 500)
         except Exception as exc:
+            self._reset_if_fatal(exc)
             raise BrokerUnavailable(f"batch publish to {topic} failed: {exc!r}") from exc
 
     def consumer(
@@ -419,6 +444,15 @@ class MemoryBus:
     async def publish_batch(self, topic: str, items: list[tuple[Event, str | None]]) -> None:
         for event, key in items:
             await self.publish(topic, event, key)
+
+    async def publish_raw(self, topic: str, value: bytes, key: str | None = None) -> None:
+        """Store bytes that need not be a valid event (tests: a poison record)."""
+        part = self._partition_for(topic, key)
+        log_ = self._logs[topic][part]
+        log_.append(Record(topic=topic, partition=part, offset=len(log_), key=key, value=value))
+        for fut in self._waiters:
+            if not fut.done():
+                fut.set_result(None)
 
     def consumer(
         self, topic: str, *, group: str | None = None, start: Start = "beginning"

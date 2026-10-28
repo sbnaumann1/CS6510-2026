@@ -135,3 +135,25 @@ def for_tx(tx: str, *types: str):
 RESERVATION_REQUESTS = of_type(ev.STOCK_RESERVATION_REQUESTED)
 RELEASE_REQUESTS = of_type(ev.STOCK_RELEASE_REQUESTED)
 REPLIES = of_type(ev.STOCK_RESERVED, ev.STOCK_REJECTED, ev.STOCK_RELEASED, ev.RESERVATION_REFUSED)
+
+
+async def wait_until(pred, timeout: float = 5.0, what: str = "condition"):
+    """Poll `pred()` (sync or async) until it is truthy; fail loudly rather than hang."""
+    import asyncio
+    import inspect
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        value = pred()
+        if inspect.isawaitable(value):
+            value = await value
+        if value:
+            return value
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        await asyncio.sleep(0.01)
+
+
+async def adjustment_states_are(tx: str, expected: list) -> bool:
+    """For wait_until: have Inventory's adjustment records for `tx` reached `expected`?"""
+    return await adjustment_states(tx) == expected

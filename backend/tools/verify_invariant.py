@@ -1,17 +1,20 @@
 #!/usr/bin/env python
-"""The graded correctness check across all stores (spec 007 FR-024, SC-002, research R10).
+"""The graded correctness check across all stores (spec 007 FR-024, SC-002, research R10;
+spec 008 FR-021).
 
     python tools/verify_invariant.py          # host: services on their debug ports
     docker compose run --rm tools python -m verify_invariant      # inside the stack
 
-It opens no database. Each service describes its own data over the mesh, and the checks
-from data-model.md §6 run over those reports:
+It opens no database. Each service describes its own data through its /internal/reports/*
+(operator access: the services never call one another), and these checks run over those reports:
 
   1. per SKU, `initial_stock - current_stock` equals the units on COMPLETED transactions
   2. no stock is negative
   3. no transaction is COMPLETING and no completion is in a non-terminal state
   4. every APPLIED reservation belongs to a COMPLETED transaction and vice versa
   5. Analytics has read every scan Checkout holds (waited for, up to 30 s)
+  6. (spec 008) Checkout's scan relay has published every committed scan
+  7. (spec 008) no outbox row of Checkout's or Inventory's is waiting to be published
 
 Exits 0 on PASS, 1 on FAIL.
 """
@@ -88,6 +91,24 @@ def check(checkout: dict, scan_count: dict, inventory: dict, analytics: dict) ->
         )
         ok = False
 
+    # Spec 008 FR-021: nothing is stranded between a state change and its event.
+    unpublished = {
+        "Checkout": scan_count.get("unpublishedOutbox", 0),
+        "Inventory": inventory.get("unpublishedOutbox", 0),
+    }
+    for name, n in unpublished.items():
+        if n:
+            lines.append(f"FAIL: {name} has {n} outbox row(s) not yet published")
+            ok = False
+    relay = scan_count.get("relayPosition", scan_count["maxScanId"])
+    if relay != scan_count["maxScanId"]:
+        lines.append(
+            f"FAIL: Checkout's scan relay has published to scan {relay}, Checkout holds {scan_count['maxScanId']}"
+        )
+        ok = False
+    lines.append(f"Outbox rows pending:   {sum(unpublished.values())}")
+    lines.append(f"Scans relayed / held:  {relay} / {scan_count['maxScanId']}")
+
     lines.append(
         "\nPASS — initial_stock - current_stock == completed line items, per SKU, and every store agrees"
         if ok
@@ -119,8 +140,12 @@ def main() -> int:
             except httpx.HTTPError as exc:
                 print(f"FAIL: cannot reach a service: {exc}")
                 return 1
-            # Analytics reads scans asynchronously: give it time to catch up before judging.
-            if reports[3]["lastScanId"] >= reports[1]["maxScanId"] or time.monotonic() > deadline:
+            # The relay and Analytics work asynchronously: give them time to catch up before judging.
+            caught_up = (
+                reports[3]["lastScanId"] >= reports[1]["maxScanId"]
+                and reports[1].get("relayPosition", reports[1]["maxScanId"]) >= reports[1]["maxScanId"]
+            )
+            if caught_up or time.monotonic() > deadline:
                 break
             time.sleep(0.25)
     ok, lines = check(*reports)
