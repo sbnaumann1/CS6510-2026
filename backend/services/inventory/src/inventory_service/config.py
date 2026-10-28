@@ -26,6 +26,7 @@ def _database_url() -> str:
 
 @dataclass(frozen=True)
 class Settings:
+    kafka_bootstrap: str = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
     database_url: str = _database_url()
     catalog_url: str = os.getenv("CATALOG_URL", "http://catalog:8000")
     # Seeding: the deterministic SKU convention (research R9); no data is read from Catalog.

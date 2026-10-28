@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "checkout.scan-recorded payload (the envelope's `data`)",
+  "type": "object",
+  "properties": {
+    "scanId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "transactionId": {
+      "type": "string",
+      "pattern": "^tx-[0-9]+$"
+    },
+    "sku": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "scanId",
+    "transactionId",
+    "sku"
+  ],
+  "additionalProperties": true
+}

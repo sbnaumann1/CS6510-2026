@@ -1,11 +1,12 @@
 [project]
 name = "catalog-service"
-version = "0.7.0"
+version = "0.8.0"
 description = "Catalog Service: what can be sold, and at what price (read-only file store)"
 requires-python = ">=3.11"
 dependencies = [
-    "checkout-web==0.7.0",
+    "checkout-web==0.8.0",
     "orjson==3.9.10",
+    "aiokafka==0.14.0",
 ]
 
 [tool.uv.sources]

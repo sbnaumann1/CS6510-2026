@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "catalog.item-published payload (the envelope's `data`)",
+  "type": "object",
+  "properties": {
+    "sku": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "priceCents": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "sku",
+    "name",
+    "priceCents"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "inventory.stock-rejected payload (the envelope's `data`)",
+  "type": "object",
+  "properties": {
+    "transactionId": {
+      "type": "string",
+      "pattern": "^tx-[0-9]+$"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "inReplyTo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "shortSkus": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "required": [
+    "transactionId",
+    "epoch",
+    "inReplyTo",
+    "shortSkus"
+  ],
+  "additionalProperties": true
+}

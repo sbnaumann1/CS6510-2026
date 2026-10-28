@@ -1,7 +1,7 @@
 [project]
 name = "backend"
-version = "0.7.0"
-description = "Supermarket self-checkout system: microservices, a private store per service (spec 007)"
+version = "0.8.0"
+description = "Supermarket self-checkout system: microservices, a private store per service (specs 007-008)"
 readme = "README.md"
 requires-python = ">=3.11"
 # The workspace root is not itself deployed: it installs every member so the
@@ -33,6 +33,7 @@ dev = [
     "pytest==7.4.3",
     "pytest-asyncio==0.21.1",
     "httpx==0.25.2",
+    "jsonschema==4.23.0",
 ]
 
 [tool.pytest.ini_options]

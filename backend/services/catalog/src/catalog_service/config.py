@@ -14,6 +14,7 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
+    kafka_bootstrap: str = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
     # Written by the seed job, mounted read-only into the service (data-model.md §1).
     catalog_file: str = os.getenv("CATALOG_FILE", "/data/catalog.csv")
     catalog_size: int = _int("CATALOG_SIZE", 2000)  # seed only

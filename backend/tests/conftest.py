@@ -181,6 +181,21 @@ async def _dispose_engines_per_loop():
 
 
 @pytest_asyncio.fixture
+async def bus():
+    """The event bus the service apps share: an in-process MemoryBus (with fault hooks),
+    or real Kafka at KAFKA_TEST_BOOTSTRAP when BROKER_TESTS=1 (tests/broker)."""
+    from checkout_web.bus import KafkaBus, MemoryBus
+
+    if os.environ.get("BROKER_TESTS") == "1":
+        b = KafkaBus(os.environ.get("KAFKA_TEST_BOOTSTRAP", "127.0.0.1:9094"), client_id="tests")
+    else:
+        b = MemoryBus()
+    await b.start()
+    yield b
+    await b.stop()
+
+
+@pytest_asyncio.fixture
 async def reset_db() -> None:
     """Reset every service's run state before a test that needs a clean slate."""
     # In gateway mode these reach the compose test stack's databases on their published

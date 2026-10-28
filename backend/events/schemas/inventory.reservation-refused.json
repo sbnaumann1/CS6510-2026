@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "inventory.reservation-refused payload (the envelope's `data`)",
+  "type": "object",
+  "properties": {
+    "transactionId": {
+      "type": "string",
+      "pattern": "^tx-[0-9]+$"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "inReplyTo": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "transactionId",
+    "epoch",
+    "inReplyTo"
+  ],
+  "additionalProperties": true
+}

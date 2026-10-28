@@ -18,6 +18,7 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
+    kafka_bootstrap: str = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
     catalog_url: str = os.getenv("CATALOG_URL", "http://catalog:8000")
     checkout_url: str = os.getenv("CHECKOUT_URL", "http://checkout:8000")
     popular_window_size: int = _int("POPULAR_WINDOW_SIZE", 1000)

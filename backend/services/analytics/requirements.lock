@@ -1,3 +1,7 @@
+aiokafka==0.14.0
+    # via
+    #   analytics-service
+    #   checkout-web
 annotated-types==0.8.0
     # via pydantic
 anyio==3.7.1
@@ -6,6 +10,8 @@ anyio==3.7.1
     #   httpx
     #   starlette
     #   watchfiles
+async-timeout==5.0.1
+    # via aiokafka
 certifi==2026.7.22
     # via
     #   httpcore
@@ -36,6 +42,8 @@ orjson==3.9.10
     # via
     #   analytics-service
     #   checkout-web
+packaging==26.3
+    # via aiokafka
 pydantic==2.5.0
     # via
     #   checkout-web
@@ -56,6 +64,7 @@ starlette==0.27.0
     # via fastapi
 typing-extensions==4.16.0
     # via
+    #   aiokafka
     #   fastapi
     #   pydantic
     #   pydantic-core

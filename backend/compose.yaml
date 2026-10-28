@@ -94,6 +94,53 @@ services:
       retries: 30
     networks: [inventory_data]
 
+  # ---- The event broker (spec 008) ------------------------------------------------
+  # One Apache Kafka broker in KRaft mode (no ZooKeeper). Containers reach it at
+  # kafka:9092; the host reaches it at 127.0.0.1:9094 (operator tooling and broker tests).
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,HOST://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms256m
+    ports:
+      - "127.0.0.1:9094:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 10s
+      retries: 40
+      start_period: 10s
+    networks: [mesh]
+
+  # One-shot: creates every topic in events/topics.yaml (events/create-topics.sh is
+  # generated from it by scripts/create_topics.py), then exits 0.
+  kafka-init:
+    image: apache/kafka:3.9.1
+    entrypoint: ["/bin/bash", "/create-topics.sh"]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      - ./events/create-topics.sh:/create-topics.sh:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [mesh]
+    restart: "no"
+
   # ---- One-shot seeds: each writes only its own service's store -------------------
   seed-catalog:
     build:
@@ -257,6 +304,7 @@ networks:
   inventory_data: {}
 
 volumes:
+  kafka_data:
   checkout_pgdata:
   inventory_pgdata:
   catalog_data:

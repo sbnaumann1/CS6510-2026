@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "checkout.scan-log-reset payload (the envelope's `data`)",
+  "type": "object",
+  "properties": {
+    "logId": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "logId"
+  ],
+  "additionalProperties": true
+}

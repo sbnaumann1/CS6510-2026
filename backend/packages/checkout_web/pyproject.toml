@@ -1,6 +1,6 @@
 [project]
 name = "checkout-web"
-version = "0.7.0"
+version = "0.8.0"
 description = "Shared HTTP conventions: contract error shape, request parsing, app factory, health check, money, request id, service client"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,6 +9,7 @@ dependencies = [
     "orjson==3.9.10",
     "pydantic==2.5.0",
     "httpx==0.25.2",
+    "aiokafka==0.14.0",
 ]
 
 [build-system]

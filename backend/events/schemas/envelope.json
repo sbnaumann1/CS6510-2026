@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Event envelope (spec 008, contracts/events.md)",
+  "type": "object",
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "correlationId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurredAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "eventId",
+    "type",
+    "version",
+    "correlationId",
+    "occurredAt",
+    "producer",
+    "data"
+  ],
+  "additionalProperties": true
+}
