@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from inventory_service import repo
-from inventory_service.catalog_client import get_snapshot
+from inventory_service.catalog_snapshot import get_snapshot
 
 
 async def read(session: AsyncSession, threshold: int) -> dict[str, Any]:

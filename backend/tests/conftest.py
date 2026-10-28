@@ -13,9 +13,10 @@ log. `seed --reset` drops a schema, so the suite refuses to run against a databa
 name does not end in `_test`.
 
 By default the four service apps run in-process: the public routes behind tests/_dispatch.py
-(the gateway twin) and the services' own calls to each other through its `MeshTransport`,
-which can inject failures. With GATEWAY_URL set, the same contract tests run over real HTTP
-against the compose test stack (specs/007-microservices-architecture/quickstart.md V5);
+(the gateway twin), and the services exchanging events through one shared `MemoryBus`
+(spec 008), whose fault hooks drop, duplicate, delay and reorder chosen events. The services
+never call each other. With GATEWAY_URL set, the same contract tests run over real HTTP
+against the compose test stack (specs/008-event-driven-kafka/quickstart.md);
 point CHECKOUT_TEST_DATABASE_URL and INVENTORY_TEST_DATABASE_URL at that stack's published
 database ports.
 
@@ -52,6 +53,13 @@ os.environ.setdefault("CATALOG_SIZE", "50")
 os.environ.setdefault("STOCK_PER_ITEM", "100")
 # Analytics tails Checkout's scan log; poll fast so tests do not wait for the 100 ms default.
 os.environ.setdefault("POPULAR_POLL_MS", "10")
+# ...and its scan consumer's poll, whose first empty poll marks the window as rebuilt.
+os.environ.setdefault("SCAN_POLL_MS", "10")
+# A scan id that never commits is skipped by the relay after this grace.
+os.environ.setdefault("RELAY_GAP_GRACE_MS", "100")
+# Failure tests wait for replies and releases; keep those budgets short.
+os.environ.setdefault("RESERVE_BUDGET_S", "1.2")
+os.environ.setdefault("RELEASE_WAIT_S", "0.6")
 
 _DEFAULT_DSN = "postgresql+asyncpg:///checkout?host=/tmp"
 
@@ -128,24 +136,25 @@ os.environ["INVENTORY_DATABASE_URL"] = _INVENTORY_DSN
 _CATALOG_DIR = tempfile.mkdtemp(prefix="catalog-test-")
 os.environ["CATALOG_FILE"] = str(pathlib.Path(_CATALOG_DIR) / "catalog.csv")
 
-from analytics_service import catalog_client as analytics_catalog  # noqa: E402
+from analytics_service import main as analytics_main  # noqa: E402
 from analytics_service import scan_source, state as analytics_state  # noqa: E402
 from analytics_service.supervisor import PipelineSupervisor  # noqa: E402
+from catalog_service import main as catalog_main  # noqa: E402
 from catalog_service import seed as catalog_seed  # noqa: E402
 from catalog_service.main import load as load_catalog  # noqa: E402
-from checkout_service import catalog_client as checkout_catalog  # noqa: E402
-from checkout_service import inventory_client  # noqa: E402
+from checkout_service import main as checkout_main  # noqa: E402
 from checkout_service import seed as checkout_seed  # noqa: E402
 from checkout_service.db import SessionLocal as CheckoutSessionLocal  # noqa: E402
 from checkout_service.db import engine as checkout_engine  # noqa: E402
 from checkout_service.db import ping as checkout_ping  # noqa: E402
-from inventory_service import catalog_client as inventory_catalog  # noqa: E402
+from inventory_service import handlers as inventory_handlers  # noqa: E402
+from inventory_service import main as inventory_main  # noqa: E402
 from inventory_service import seed as inventory_seed  # noqa: E402
 from inventory_service.config import settings as inventory_settings  # noqa: E402
 from inventory_service.db import SessionLocal as InventorySessionLocal  # noqa: E402
 from inventory_service.db import engine as inventory_engine  # noqa: E402
 from inventory_service.db import ping as inventory_ping  # noqa: E402
-from tests._dispatch import MeshTransport, build_apps, build_dispatch_app  # noqa: E402
+from tests._dispatch import OpsTransport, build_apps, build_dispatch_app  # noqa: E402
 
 _INVENTORY_TABLES = re.compile(r"\b(inventory_stock|low_stock_alert|stock_adjustment)\b", re.I)
 _CHECKOUT_TABLES = re.compile(r"\b(transaction|transaction_item|completion)\b", re.I)
@@ -206,25 +215,93 @@ async def reset_db() -> None:
     if not GATEWAY_URL:
         catalog_seed.main(["--reset"])
         analytics_state.reset()
+        # A new test starts a new relay on a new bus: tell it the log is the one it is
+        # about to read, so it does not announce a reset nobody is waiting for. (A test that
+        # wants the reset announced calls checkout_seed.main([]) itself, while the relay runs.)
+        async with CheckoutSessionLocal() as s:
+            await s.execute(
+                text(
+                    "INSERT INTO relay_state (id, last_published_scan_id, log_token)"
+                    " SELECT 1, 0, token FROM scan_log WHERE id = 1"
+                    " ON CONFLICT (id) DO UPDATE SET last_published_scan_id = 0,"
+                    "   log_token = EXCLUDED.log_token"
+                )
+            )
+            await s.commit()
+
+
+class Stack(OpsTransport):
+    """The in-process system: the four service apps, one shared event bus, and (as an httpx
+    transport) read access to each service's /internal/reports/* for the operator checks.
+
+    Tests inject event faults on `stack.bus` (drop, duplicate, delay, reorder,
+    fail_publish, crash_before_commit); the services themselves never call one another."""
+
+    def __init__(self, apps: dict, bus, modules: dict) -> None:
+        super().__init__(apps)
+        self.bus = bus
+        self.modules = modules
+        self.tasks: dict[str, list[asyncio.Task]] = {}
+
+    async def stop_service(self, name: str) -> None:
+        """Stop a service's event work (its consumers, relay and sweepers), as if its
+        process had stopped. The HTTP app stays routable; only what it does with events stops."""
+        await self.modules[name].stop_background(self.tasks.pop(name, []))
+
+    async def start_service(self, name: str) -> None:
+        """Start it again, as a restarted process: fresh snapshots, consumers re-positioned."""
+        self.tasks[name] = await self.modules[name].start_background(self.bus)
+
+
+async def _stack_ready(timeout: float = 10.0) -> None:
+    """Wait for every service's event path: snapshots loaded, consumers positioned."""
+    from analytics_service import catalog_snapshot as analytics_snap
+    from checkout_service import catalog_snapshot as checkout_snap
+    from checkout_service import stock_events
+    from inventory_service import catalog_snapshot as inventory_snap
+
+    from checkout_service import relay as checkout_relay
+
+    checks = {
+        "checkout scan relay": lambda: checkout_relay.get_relay().passes >= 1,
+        "checkout catalog snapshot": lambda: checkout_snap.get_snapshot().ready,
+        "checkout reply consumer": lambda: stock_events.get_client().ready,
+        "inventory catalog snapshot": lambda: inventory_snap.get_snapshot().ready,
+        "inventory request consumer": inventory_handlers.ready,
+        "analytics catalog snapshot": lambda: analytics_snap.get_snapshot().ready,
+        "analytics scan window": lambda: scan_source.default_source().caught_up,
+    }
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        pending = [name for name, ok in checks.items() if not ok()]
+        if not pending:
+            return
+        if asyncio.get_running_loop().time() > deadline:
+            raise TimeoutError(f"the in-process stack did not become ready: {pending}")
+        await asyncio.sleep(0.005)
 
 
 @pytest_asyncio.fixture
-async def mesh(reset_db) -> MeshTransport:
-    """The in-process service mesh: every service client talks through this transport.
-
-    Tests inject failures with `mesh.fail(target, path_prefix, times=N, mode=...)`."""
+async def stack(reset_db, bus):
+    """All four services in-process on one shared bus (or None in gateway mode)."""
     if GATEWAY_URL:
-        yield None  # the real services talk to each other
+        yield None  # the real services exchange events through the real broker
         return
     apps = build_apps()
-    transport = MeshTransport(apps)
-    transport.apps = apps  # type: ignore[attr-defined]
-    for module in (checkout_catalog, inventory_catalog, analytics_catalog, inventory_client, scan_source):
-        module.reset(transport)
+    modules = {
+        "analytics": analytics_main,
+        "inventory": inventory_main,
+        "checkout": checkout_main,
+        "catalog": catalog_main,
+    }
+    st = Stack(apps, bus, modules)
     load_catalog()  # a lifespan would do this; lifespans do not run under ASGITransport
-    yield transport
-    for module in (checkout_catalog, inventory_catalog, analytics_catalog, inventory_client, scan_source):
-        module.reset(None)
+    for name, module in modules.items():  # Catalog last: it publishes what the others read
+        st.tasks[name] = await module.start_background(bus)
+    await _stack_ready()
+    yield st
+    for name in list(st.tasks):
+        await st.stop_service(name)
 
 
 class AnalyticsHandle:
@@ -261,7 +338,7 @@ class AnalyticsHandle:
 
 
 @pytest_asyncio.fixture
-async def analytics(mesh) -> AnalyticsHandle:
+async def analytics(stack) -> AnalyticsHandle:
     handle = AnalyticsHandle()
     if GATEWAY_URL:
         yield handle  # the real Analytics runs in the stack
@@ -303,6 +380,22 @@ async def _wait_for_analytics(timeout: float = 10.0) -> None:
         await asyncio.sleep(0.01)
 
 
+async def _wait_for_scan_events(timeout: float = 10.0) -> None:
+    """Wait until the scan relay has published, and Analytics' consumer has read, every scan
+    Checkout has committed (the relay runs asynchronously, so a test that restarts Analytics
+    "after" some scans must wait for them to be on the topic first)."""
+    if GATEWAY_URL:
+        return
+    target = await _checkout_max_scan_id()
+    deadline = asyncio.get_running_loop().time() + timeout
+    while scan_source.default_source().highest_applied < target:
+        if asyncio.get_running_loop().time() > deadline:
+            raise TimeoutError(
+                f"scan events at {scan_source.default_source().highest_applied}, checkout at {target}"
+            )
+        await asyncio.sleep(0.01)
+
+
 class SyncingClient(AsyncClient):
     """Reads of /analytics/* wait for Analytics to catch up first (it reads scans
     asynchronously; the tests assert on content, not on timing)."""
@@ -314,20 +407,20 @@ class SyncingClient(AsyncClient):
 
 
 @pytest_asyncio.fixture
-async def client(reset_db, mesh, analytics) -> AsyncClient:
+async def client(reset_db, stack, analytics) -> AsyncClient:
     if GATEWAY_URL:
         async with SyncingClient(base_url=GATEWAY_URL, timeout=15) as c:
             yield c
         return
-    async with SyncingClient(app=build_dispatch_app(mesh.apps), base_url="http://test") as c:
+    async with SyncingClient(app=build_dispatch_app(stack.apps), base_url="http://test") as c:
         yield c
 
 
 @pytest_asyncio.fixture
-async def checkout_client(reset_db, mesh) -> AsyncClient:
+async def checkout_client(reset_db, stack) -> AsyncClient:
     """The public API with no Analytics pipeline running, for tests that start, stop and
     restart pipelines of their own."""
-    async with AsyncClient(app=build_dispatch_app(mesh.apps), base_url="http://test") as c:
+    async with AsyncClient(app=build_dispatch_app(stack.apps), base_url="http://test") as c:
         yield c
 
 
@@ -377,6 +470,12 @@ async def inventory_session():
 async def session():
     async with CheckoutSessionLocal() as c, InventorySessionLocal() as i:
         yield RoutedSession(c, i)
+
+
+@pytest_asyncio.fixture
+async def poll_scan_events():
+    """Returns a coroutine function that waits until every scan is on the scan topic."""
+    return _wait_for_scan_events
 
 
 @pytest_asyncio.fixture

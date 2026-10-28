@@ -41,6 +41,10 @@ class Settings:
     recovery_lease_s: float = _float("RECOVERY_LEASE_S", 10.0)
     recovery_interval_s: float = _float("RECOVERY_INTERVAL_S", 2.0)
     reserve_budget_s: float = _float("RESERVE_BUDGET_S", 4.0)
+    # How long a release request waits for Inventory's confirmation (completion-flow.md).
+    release_wait_s: float = _float("RELEASE_WAIT_S", 2.0)
+    # Scan relay (research R8): a missing scan id is a permanent gap only after this grace.
+    relay_gap_grace_ms: int = _int("RELAY_GAP_GRACE_MS", 1000)
     # Keep workers x pool below this database's max_connections (compose-topology.md).
     db_pool_size: int = _int("DB_POOL_SIZE", 10)
     workers: int = _int("WORKERS", 6)

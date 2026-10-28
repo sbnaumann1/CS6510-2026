@@ -22,6 +22,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -148,3 +149,42 @@ class Completion(Base):
         ),
         Index("completion_open_idx", "updated_at", postgresql_where=text("state NOT IN ('COMPLETED', 'ABORTED')")),
     )
+
+
+class Outbox(Base):
+    """Events written in the same local transaction as the state change that causes them
+    (spec 008 research R7, data-model.md). After COMMIT the writer publishes the event
+    itself and sets `published_at` (the fast path); a sweeper republishes any row still
+    unpublished after a short grace, so a crash or a broker outage never loses an event.
+    Delivery is at-least-once; every consumer is idempotent."""
+
+    __tablename__ = "outbox"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, unique=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    published_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("outbox_unpublished_idx", "id", postgresql_where=text("published_at IS NULL")),
+    )
+
+
+class RelayState(Base):
+    """Where the scan relay has got to: the highest scan id published to
+    `checkout.scans.v1`, and the scan-log token that position belongs to (spec 008 R8)."""
+
+    __tablename__ = "relay_state"
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, server_default="1")
+    last_published_scan_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    log_token: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+
+    __table_args__ = (CheckConstraint("id = 1", name="relay_state_single_row"),)

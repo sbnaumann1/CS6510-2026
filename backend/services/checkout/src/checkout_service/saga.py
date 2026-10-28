@@ -1,14 +1,15 @@
 """The completion saga: Checkout orchestrates, Inventory participates
-(contracts/completion-saga.md, spec 007 research R1-R3).
+(specs/008-event-driven-kafka/contracts/completion-flow.md; spec 007 research R1-R3).
 
-    1. local tx    OPEN -> COMPLETING, completion row RESERVING   (Checkout's database)
-    2. HTTP        Inventory reserve (idempotent, one local tx)    (Inventory's database)
-    3. local tx    COMPLETING -> COMPLETED, completion COMPLETED   (Checkout's database)
+    1. local tx    OPEN -> COMPLETING, completion RESERVING, request in the outbox  (Checkout's database)
+    2. event       publish stock-reservation-requested, await the reply event
+    3. (Inventory) one local tx: reserve or reject, outcome in its outbox, publish
+    4. local tx    COMPLETING -> COMPLETED, completion COMPLETED                     (Checkout's database)
 
 Roll back when the outcome is unknown, roll forward only when stock is certainly
 reserved. Every step is idempotent, so a retried request and the recovery loop can both
-drive the same saga to the same end. No database transaction is held across the HTTP call,
-so the hot-SKU stock locks live only inside Inventory.
+drive the same saga to the same end. No database transaction is held while waiting for
+the reply, so the hot-SKU stock locks live only inside Inventory.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from checkout_service import catalog_client, inventory_client, repo
+from checkout_service import catalog_snapshot, repo, stock_events
 from checkout_service.config import settings
 from checkout_service.db import SessionLocal
 from checkout_web.errors import (
@@ -29,6 +30,7 @@ from checkout_web.errors import (
     ApiError,
     UpstreamUnavailable,
 )
+from checkout_web.events import CHECKOUT_COMPLETIONS
 from checkout_web.money import cents_to_amount
 from checkout_web.request import log_step
 
@@ -56,6 +58,15 @@ async def _set_state(tx_id: int, state: str, error: str | None = None) -> None:
             await repo.set_completion_state(session, tx_id, state, error)
 
 
+async def _mark_compensating(tx_id: int, event, reason: str | None) -> None:
+    """COMPENSATING and the release request it owes Inventory, in one local transaction:
+    the release can never be forgotten, and is never announced without the state."""
+    async with SessionLocal() as session:
+        async with session.begin():
+            await repo.set_completion_state(session, tx_id, "COMPENSATING", reason)
+            await repo.insert_outbox(session, CHECKOUT_COMPLETIONS, public_id(tx_id), event)
+
+
 async def reopen(tx_id: int) -> None:
     async with SessionLocal() as session:
         async with session.begin():
@@ -76,9 +87,10 @@ async def rollback(tx_id: int, epoch: int, *, reason: str = "") -> None:
     loop, and UpstreamUnavailable propagates."""
     public = public_id(tx_id)
     t0 = time.monotonic()
-    await _set_state(tx_id, "COMPENSATING", reason or None)
+    request = stock_events.release_request(public, epoch)
+    await _mark_compensating(tx_id, request, reason or None)
     try:
-        await inventory_client.get_client().release(public, epoch)
+        await stock_events.get_client().release(public, epoch, event=request)
     except UpstreamUnavailable:
         log_step("release", tx=public, outcome="undelivered",
                  elapsed_ms=(time.monotonic() - t0) * 1000)
@@ -95,6 +107,7 @@ class _Begun:
     total_cents: int
     epoch: int
     took_over: bool
+    request_event: Any = None  # the reservation request written to the outbox in step 1
 
 
 @dataclass(frozen=True)
@@ -122,7 +135,9 @@ async def _begin(tx_id: int, public: str) -> _Begun | _Compensating:
                     raise ApiError(EMPTY_BASKET, f"Transaction {public} has no scanned items.")
                 total_cents = sum(b.unit_price_cents * b.qty for b in basket)
                 epoch = await repo.mark_completing(session, tx_id, total_cents)
-                return _Begun(tx, basket, total_cents, epoch, took_over=False)
+                request = stock_events.reservation_request(public, epoch, _lines(basket))
+                await repo.insert_outbox(session, CHECKOUT_COMPLETIONS, public, request)
+                return _Begun(tx, basket, total_cents, epoch, took_over=False, request_event=request)
 
             completion = await repo.get_completion(session, tx_id, settings.recovery_lease_s)
             if completion is None:  # pragma: no cover - COMPLETING always has a record
@@ -159,26 +174,27 @@ async def complete(tx_id: int) -> dict[str, Any]:
     tx, basket, total_cents, epoch, joined = (
         begun.tx, begun.basket, begun.total_cents, begun.epoch, begun.took_over
     )
+    request_event = begun.request_event
     log_step("begin", tx=public, outcome="took-over" if joined else "ok",
              elapsed_ms=(time.monotonic() - started) * 1000)
 
-    # Step 2: reserve stock in Inventory.
+    # Step 2: ask Inventory to reserve the stock, and wait for its reply event.
     t0 = time.monotonic()
     try:
-        reserved = await inventory_client.get_client().reserve(
-            public, epoch, _lines(basket)
+        reserved = await stock_events.get_client().reserve(
+            public, epoch, _lines(basket), event=request_event
         )
     except UpstreamUnavailable as exc:
         log_step("reserve", tx=public, outcome="timeout", elapsed_ms=(time.monotonic() - t0) * 1000)
         await rollback(tx_id, epoch, reason=str(exc))
         raise
-    if isinstance(reserved, inventory_client.Insufficient):
+    if isinstance(reserved, stock_events.Insufficient):
         await reopen(tx_id)
         log_step("reserve", tx=public, outcome="rejected", elapsed_ms=(time.monotonic() - t0) * 1000)
         raise ApiError(
             INSUFFICIENT_STOCK, "Insufficient stock for " + ", ".join(reserved.short_skus) + "."
         )
-    if isinstance(reserved, inventory_client.ReservationReleased):
+    if isinstance(reserved, stock_events.ReservationReleased):
         # A release for this transaction was recorded first: it is already undone.
         await reopen(tx_id)
         log_step("reserve", tx=public, outcome="released", elapsed_ms=(time.monotonic() - t0) * 1000)
@@ -203,7 +219,7 @@ async def complete(tx_id: int) -> dict[str, Any]:
             completed_at = await repo.get_completed_at(session, tx_id)
     log_step("finalize", tx=public, outcome="ok", elapsed_ms=(time.monotonic() - t0) * 1000)
 
-    snapshot = catalog_client.get_snapshot()
+    snapshot = catalog_snapshot.get_snapshot()
     if basket:
         try:
             await snapshot.get(basket[0].sku)  # warm the names after a restart

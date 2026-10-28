@@ -41,9 +41,10 @@ def main(argv: list[str] | None = None) -> int:
         Base.metadata.create_all(conn)
         if not args.reset and exists is not None:
             # Run state only; the schema stays.
-            conn.execute(text("TRUNCATE completion, transaction_item, transaction RESTART IDENTITY CASCADE"))
-        # A new scan log: Analytics notices the change and rebuilds instead of trusting a
-        # cursor into the old one.
+            conn.execute(text("TRUNCATE completion, outbox, transaction_item, transaction RESTART IDENTITY CASCADE"))
+        # A new scan log: the relay notices the changed token and publishes `scan-log-reset`,
+        # and Analytics rebuilds instead of trusting a cursor into the old one. relay_state is
+        # deliberately left alone here: it is what lets a running relay see the change.
         conn.execute(
             text(
                 "INSERT INTO scan_log (id, token) VALUES (1, md5(random()::text || clock_timestamp()::text))"

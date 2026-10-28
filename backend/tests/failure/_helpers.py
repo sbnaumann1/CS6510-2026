@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from checkout_web import events as ev
+
 from checkout_service.db import SessionLocal as CheckoutSessionLocal
 from inventory_service.db import SessionLocal as InventorySessionLocal
 
@@ -113,3 +115,23 @@ async def completion_state(tx: str) -> tuple[int, str] | None:
             )
         ).first()
     return None if row is None else (row.epoch, row.state)
+
+
+# --- event predicates for MemoryBus fault hooks (stack.bus.drop / duplicate / delay / ...) ---
+
+
+def of_type(*types: str):
+    """Matches events of these types: `stack.bus.drop(of_type(ev.STOCK_RESERVED))`."""
+    return lambda topic, event, key: event.type in types
+
+
+def for_tx(tx: str, *types: str):
+    """Matches events about one transaction (and, if given, of these types)."""
+    return lambda topic, event, key: (
+        event.data.get("transactionId") == tx and (not types or event.type in types)
+    )
+
+
+RESERVATION_REQUESTS = of_type(ev.STOCK_RESERVATION_REQUESTED)
+RELEASE_REQUESTS = of_type(ev.STOCK_RELEASE_REQUESTED)
+REPLIES = of_type(ev.STOCK_RESERVED, ev.STOCK_REJECTED, ev.STOCK_RELEASED, ev.RESERVATION_REFUSED)

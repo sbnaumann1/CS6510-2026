@@ -20,9 +20,10 @@ log = logging.getLogger("checkout")
 def health_router(
     service: str,
     probe: Callable[[], Awaitable[None]],
-    readiness: Mapping[str, Callable[[], bool]] | None = None,
+    readiness: Mapping[str, Callable[[], bool]] | Callable[[], Mapping[str, Callable[[], bool]]] | None = None,
 ) -> APIRouter:
-    """`readiness` maps a name to a cheap synchronous check (broker connected, consumer
+    """`readiness` maps a name to a cheap synchronous check (or is a function returning that
+    mapping, for checks that exist only after startup) (broker connected, consumer
     positioned, catalog snapshot loaded). /healthz is 200 only when the probe and every
     check pass, so `docker compose --wait` blocks until the event path works (spec 008)."""
     router = APIRouter(tags=["health"])
@@ -37,7 +38,7 @@ def health_router(
                 status_code=503,
                 content={"error": INTERNAL_ERROR[0], "message": f"{service} is not ready."},
             )
-        for check, ok in (readiness or {}).items():
+        for check, ok in (readiness() if callable(readiness) else (readiness or {})).items():
             if not ok():
                 log.warning("%s not ready: %s", service, check)
                 return ORJSONResponse(

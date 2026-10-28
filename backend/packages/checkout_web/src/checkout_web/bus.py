@@ -78,6 +78,10 @@ class Bus(Protocol):
     async def publish(self, topic: str, event: Event, key: str | None = None) -> None:
         """Returns once the broker has acknowledged the event. Raises BrokerUnavailable."""
 
+    async def publish_batch(self, topic: str, items: list[tuple[Event, str | None]]) -> None:
+        """Publish many events **in the order given** and return once all are acknowledged.
+        Raises BrokerUnavailable; some of them may already have been stored."""
+
     def consumer(
         self, topic: str, *, group: str | None = None, start: Start = "beginning"
     ) -> Consumer: ...
@@ -158,6 +162,27 @@ class KafkaBus:
             )
         except Exception as exc:  # KafkaError, timeout, connection loss
             raise BrokerUnavailable(f"publish to {topic} failed: {exc!r}") from exc
+
+    async def publish_batch(self, topic: str, items: list[tuple[Event, str | None]]) -> None:
+        producer = self._producer
+        if producer is None:
+            raise BrokerUnavailable("the broker connection is not up yet")
+        try:
+            # `send` enqueues in call order (so partition order is call order); the acks are
+            # awaited together, so the producer batches the whole run into a few requests.
+            futures = []
+            for event, key in items:
+                futures.append(
+                    await producer.send(
+                        topic,
+                        encode(event),
+                        key=key.encode() if key is not None else None,
+                        headers=[(k, v.encode()) for k, v in headers(event).items()],
+                    )
+                )
+            await asyncio.wait_for(asyncio.gather(*futures), self._publish_timeout_s + len(items) / 500)
+        except Exception as exc:
+            raise BrokerUnavailable(f"batch publish to {topic} failed: {exc!r}") from exc
 
     def consumer(
         self, topic: str, *, group: str | None = None, start: Start = "beginning"
@@ -340,10 +365,11 @@ class MemoryBus:
         self._committed: dict[tuple[str, str], dict[int, int]] = {}
         self._faults: list[_Fault] = []
         self._crash_before_commit: dict[str, int] = {}
-        self._wakeup = asyncio.Condition()
+        self._waiters: list[asyncio.Future] = []  # consumers waiting for a new record
         self._rr = itertools.count()
         self._pending: set[asyncio.Task] = set()
         self.published: list[tuple[str, str | None, Event]] = []  # every accepted publish, in order
+        self.attempts: list[tuple[str, str | None, Event]] = []  # every publish call, accepted or not
 
     # ---- Bus -----------------------------------------------------------------------
 
@@ -360,6 +386,7 @@ class MemoryBus:
     async def publish(self, topic: str, event: Event, key: str | None = None) -> None:
         if topic not in self._logs:
             raise BrokerUnavailable(f"unknown topic {topic}")
+        self.attempts.append((topic, key, event))
         for fault in self._faults:
             if fault.kind == "fail" and fault.matches(topic, event, key):
                 fault.times -= 1
@@ -388,6 +415,10 @@ class MemoryBus:
                 await self._append(*held[:3], held[3])
                 return
         await self._append(topic, event, key, copies)
+
+    async def publish_batch(self, topic: str, items: list[tuple[Event, str | None]]) -> None:
+        for event, key in items:
+            await self.publish(topic, event, key)
 
     def consumer(
         self, topic: str, *, group: str | None = None, start: Start = "beginning"
@@ -434,6 +465,10 @@ class MemoryBus:
     def events(self, topic: str) -> list[Event]:
         return [r.event() for r in self.records(topic)]
 
+    def attempts_of(self, *types: str) -> int:
+        """How many times an event of these types was handed to `publish` (accepted or not)."""
+        return sum(1 for _, _, e in self.attempts if e.type in types)
+
     def end_offsets(self, topic: str) -> list[int]:
         return [len(p) for p in self._logs[topic]]
 
@@ -460,8 +495,9 @@ class MemoryBus:
                 )
             )
         self.published.append((topic, key, event))
-        async with self._wakeup:
-            self._wakeup.notify_all()
+        for fut in self._waiters:
+            if not fut.done():
+                fut.set_result(None)
 
     async def _append_later(self, topic, event, key, seconds, copies) -> None:
         await asyncio.sleep(seconds)
@@ -498,11 +534,13 @@ class MemoryConsumer:
         out = self._take(max_records)
         if out:
             return out
+        # asyncio.wait, not wait_for: wait_for can swallow a cancellation (see lifecycle.py).
+        fut = asyncio.get_running_loop().create_future()
+        self._bus._waiters.append(fut)
         try:
-            async with self._bus._wakeup:
-                await asyncio.wait_for(self._bus._wakeup.wait(), timeout_ms / 1000)
-        except asyncio.TimeoutError:
-            return []
+            await asyncio.wait({fut}, timeout=timeout_ms / 1000)
+        finally:
+            self._bus._waiters.remove(fut)
         return self._take(max_records)
 
     def _take(self, max_records: int) -> list[Record]:

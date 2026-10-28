@@ -109,6 +109,8 @@ async def test_reserve_short_returns_sorted_short_list_and_modifies_nothing(
         "SKU-000020": 5,
         "SKU-000021": 0,
     }
-    n = await s.scalar(text("SELECT count(*) FROM stock_adjustment"))
+    rows = (await s.execute(text("SELECT state FROM stock_adjustment"))).all()
     await s.commit()
-    assert n == 0, "a refused reservation leaves no adjustment record"
+    # Spec 008: a refusal is recorded (REJECTED) so a repeated request replays the same answer;
+    # it still changes no stock.
+    assert [r.state for r in rows] == ["REJECTED"], "a refused reservation records only REJECTED"

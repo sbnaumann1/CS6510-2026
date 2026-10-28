@@ -1,4 +1,4 @@
-"""Analytics against Checkout through the mesh (spec 007 research R5): it reads scans in
+"""Analytics fed by Checkout's scan events (spec 008 research R8; spec 007 research R5): it reads scans in
 order, rebuilds after losing its memory, copes with holes, and re-bootstraps when Checkout's
 data is reset. It has no store of its own."""
 
@@ -60,7 +60,7 @@ async def test_a_restarted_analytics_rebuilds_the_same_window(client, analytics,
 
 
 async def test_a_hole_that_never_commits_is_skipped_after_the_grace_period(
-    checkout_client, mesh
+    checkout_client, stack
 ):
     from tests.integration.test_persistent_pipeline import scan as pscan
 
@@ -86,7 +86,7 @@ async def test_a_hole_that_never_commits_is_skipped_after_the_grace_period(
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_checkout_data_reset_triggers_a_rebootstrap(checkout_client, mesh):
+async def test_checkout_data_reset_triggers_a_rebootstrap(checkout_client, stack):
     tx = await open_tx(checkout_client)
     for i in range(30):
         await scan(checkout_client, tx, f"SKU-{i % 3 + 1:06d}")

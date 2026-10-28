@@ -2,7 +2,7 @@
 
 Each function runs one statement against the caller's session. None of them commit
 or begin. The reservation statements live in reserve.py. Item names are not joined
-here: they come from Catalog's public API (catalog_client.py).
+here: they come from the snapshot of Catalog's events (catalog_snapshot.py).
 """
 
 from __future__ import annotations
@@ -10,8 +10,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
+import orjson
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from checkout_web.events import Event
 
 # Live stock joined to the most recent alert row per SKU (001 data-model.md). The alert
 # row supplies only the timestamp; currentStock always comes from live inventory.
@@ -57,3 +60,58 @@ async def adjustments(session: AsyncSession) -> Sequence[Row]:
 
 async def now(session: AsyncSession) -> datetime:
     return await session.scalar(_NOW)
+
+
+# --- outbox (spec 008) ------------------------------------------------------------------
+
+_INSERT_OUTBOX = text(
+    "INSERT INTO outbox (topic, key, event_id, payload)"
+    " VALUES (:topic, :key, CAST(:event_id AS uuid), CAST(:payload AS jsonb))"
+)
+_MARK_PUBLISHED = text(
+    "UPDATE outbox SET published_at = now()"
+    " WHERE event_id = CAST(:event_id AS uuid) AND published_at IS NULL"
+)
+_CLAIM_UNPUBLISHED = text(
+    "SELECT id, topic, key, payload, event_id::text AS event_id FROM outbox"
+    " WHERE published_at IS NULL AND created_at < now() - make_interval(secs => :age)"
+    " ORDER BY id LIMIT :n FOR UPDATE SKIP LOCKED"
+)
+_DELETE_PUBLISHED = text(
+    "DELETE FROM outbox WHERE published_at IS NOT NULL"
+    " AND published_at < now() - make_interval(hours => :hours)"
+)
+_UNPUBLISHED_COUNT = text(
+    "SELECT count(*) FROM outbox WHERE published_at IS NULL"
+    " AND created_at < now() - make_interval(secs => :age)"
+)
+
+
+async def insert_outbox(session: AsyncSession, topic: str, key: str, event: Event) -> None:
+    await session.execute(
+        _INSERT_OUTBOX,
+        {
+            "topic": topic,
+            "key": key,
+            "event_id": event.event_id,
+            "payload": orjson.dumps(event.to_dict()).decode(),
+        },
+    )
+
+
+async def mark_published(session: AsyncSession, event_id: str) -> None:
+    await session.execute(_MARK_PUBLISHED, {"event_id": event_id})
+
+
+async def claim_unpublished(
+    session: AsyncSession, age_s: float = 2.0, limit: int = 100
+) -> Sequence[Row]:
+    return (await session.execute(_CLAIM_UNPUBLISHED, {"age": age_s, "n": limit})).all()
+
+
+async def delete_published_older_than(session: AsyncSession, hours: int = 1) -> int:
+    return (await session.execute(_DELETE_PUBLISHED, {"hours": hours})).rowcount or 0
+
+
+async def unpublished_count(session: AsyncSession, age_s: float = 2.0) -> int:
+    return int(await session.scalar(_UNPUBLISHED_COUNT, {"age": age_s}) or 0)

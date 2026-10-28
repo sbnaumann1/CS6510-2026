@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     stock = settings.stock_per_item
     with engine.begin() as conn:
         # Run state only: reservations and alerts. The stock rows are reset below.
-        conn.execute(text("TRUNCATE stock_adjustment, low_stock_alert RESTART IDENTITY"))
+        conn.execute(text("TRUNCATE stock_adjustment, low_stock_alert, outbox RESTART IDENTITY"))
         conn.execute(text("DELETE FROM inventory_stock"))
         conn.execute(
             text(

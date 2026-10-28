@@ -30,7 +30,7 @@ def client(checkout_client):
     return checkout_client
 
 
-async def test_restart_backfills_and_publishes_the_latest_window(client, caplog):
+async def test_restart_backfills_and_publishes_the_latest_window(client, caplog, poll_scan_events):
     caplog.set_level(logging.INFO, logger="analytics")
     tx = await open_tx(client)
 
@@ -46,9 +46,11 @@ async def test_restart_backfills_and_publishes_the_latest_window(client, caplog)
     await asyncio.gather(task, return_exceptions=True)
     state.reset()  # the process is gone: so is its memory
 
-    # Analytics is "down": 900 more scans, max id 1600, latest boundary 1500.
+    # Analytics is "down": 900 more scans, max id 1600, latest boundary 1500. They are on the
+    # scan topic (the relay publishes them whether or not anyone is reading).
     for i in range(900):
         await scan(client, tx, f"SKU-{i % 11 + 1:06d}")
+    await poll_scan_events()
     caplog.clear()
 
     published: list = []

@@ -132,6 +132,11 @@ def decode(raw: bytes | str) -> Event:
         body = orjson.loads(raw)
     except Exception as exc:
         raise EventDecodeError(f"not JSON: {exc}") from None
+    return from_dict(body)
+
+
+def from_dict(body: Any) -> Event:
+    """Build an Event from its wire form (a decoded JSON object, or an outbox payload)."""
     if not isinstance(body, dict):
         raise EventDecodeError("an event must be a JSON object")
     try:

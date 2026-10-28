@@ -18,7 +18,7 @@ verify = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(verify)
 
 
-async def reports(mesh):
+async def reports(stack):
     out = {}
     for key, host, path in (
         ("sold", "checkout", "/internal/reports/sold-by-sku"),
@@ -26,27 +26,27 @@ async def reports(mesh):
         ("stock", "inventory", "/internal/reports/stock"),
         ("cursor", "analytics", "/internal/reports/cursor"),
     ):
-        async with AsyncClient(transport=mesh, base_url=f"http://{host}:8000") as c:
+        async with AsyncClient(transport=stack, base_url=f"http://{host}:8000") as c:
             r = await c.get(path)
             assert r.status_code == 200, (path, r.text)
             out[key] = r.json()
     return out["sold"], out["scans"], out["stock"], out["cursor"]
 
 
-async def test_passes_after_normal_traffic(client, mesh, poll_analytics):
+async def test_passes_after_normal_traffic(client, stack, poll_analytics):
     for _ in range(3):
         tx = await basket(client, {"SKU-000001": 2, "SKU-000004": 1})
         assert (await complete(client, tx)).status_code == 200
     await basket(client, {"SKU-000002": 2})  # scanned, never completed
     await poll_analytics()
 
-    ok, lines = verify.check(*await reports(mesh))
+    ok, lines = verify.check(*await reports(stack))
 
     assert ok, "\n".join(lines)
     assert "PASS" in lines[-1]
 
 
-async def test_fails_when_stock_drifts_from_what_was_sold(client, mesh, poll_analytics, inventory_session):
+async def test_fails_when_stock_drifts_from_what_was_sold(client, stack, poll_analytics, inventory_session):
     tx = await basket(client, {"SKU-000001": 2})
     assert (await complete(client, tx)).status_code == 200
     await poll_analytics()
@@ -55,13 +55,13 @@ async def test_fails_when_stock_drifts_from_what_was_sold(client, mesh, poll_ana
     )
     await inventory_session.commit()
 
-    ok, lines = verify.check(*await reports(mesh))
+    ok, lines = verify.check(*await reports(stack))
 
     assert not ok
     assert any("SKU-000001" in line and "drift=+5" in line for line in lines)
 
 
-async def test_fails_when_a_transaction_is_stuck_completing(client, mesh, poll_analytics):
+async def test_fails_when_a_transaction_is_stuck_completing(client, stack, poll_analytics):
     from checkout_service import repo
     from checkout_service.db import SessionLocal
 
@@ -71,15 +71,15 @@ async def test_fails_when_a_transaction_is_stuck_completing(client, mesh, poll_a
             await repo.mark_completing(s, int(tx.removeprefix("tx-")), 85)
     await poll_analytics()
 
-    ok, lines = verify.check(*await reports(mesh))
+    ok, lines = verify.check(*await reports(stack))
 
     assert not ok
     assert any("COMPLETING" in line for line in lines)
 
 
-async def test_fails_when_analytics_has_not_read_every_scan(client, mesh, analytics):
+async def test_fails_when_analytics_has_not_read_every_scan(client, stack, analytics):
     await basket(client, {"SKU-000001": 3})
-    sold, scans, stock, _ = await reports(mesh)
+    sold, scans, stock, _ = await reports(stack)
 
     ok, lines = verify.check(sold, scans, stock, {"lastScanId": 1, "windowEnd": 0})
 

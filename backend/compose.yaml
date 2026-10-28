@@ -192,6 +192,7 @@ services:
       dockerfile: services/catalog/Dockerfile
     image: checkout-catalog
     environment:
+      KAFKA_BOOTSTRAP: kafka:9092
       CATALOG_FILE: /data/catalog.csv
       WORKERS: "2"
     volumes:
@@ -199,6 +200,8 @@ services:
     ports:
       - "127.0.0.1:8081:8000"
     depends_on:
+      kafka-init:
+        condition: service_completed_successfully
       seed-catalog:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
@@ -210,6 +213,7 @@ services:
       dockerfile: services/checkout/Dockerfile
     image: checkout-checkout
     environment:
+      KAFKA_BOOTSTRAP: kafka:9092
       DATABASE_URL: postgresql+asyncpg://${CHECKOUT_DB_USER:-checkout_user}:${CHECKOUT_DB_PASSWORD:-checkout_pass}@checkout-db:5432/checkout
       CATALOG_URL: http://catalog:8000
       INVENTORY_URL: http://inventory:8000
@@ -220,6 +224,8 @@ services:
     ports:
       - "127.0.0.1:8082:8000"
     depends_on:
+      kafka-init:
+        condition: service_completed_successfully
       seed-checkout:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
@@ -231,6 +237,7 @@ services:
       dockerfile: services/inventory/Dockerfile
     image: checkout-inventory
     environment:
+      KAFKA_BOOTSTRAP: kafka:9092
       DATABASE_URL: postgresql+asyncpg://${INVENTORY_DB_USER:-inventory_user}:${INVENTORY_DB_PASSWORD:-inventory_pass}@inventory-db:5432/inventory
       CATALOG_URL: http://catalog:8000
       WORKERS: "2"
@@ -239,6 +246,8 @@ services:
     ports:
       - "127.0.0.1:8083:8000"
     depends_on:
+      kafka-init:
+        condition: service_completed_successfully
       seed-inventory:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
@@ -252,6 +261,7 @@ services:
       dockerfile: services/analytics/Dockerfile
     image: checkout-analytics
     environment:
+      KAFKA_BOOTSTRAP: kafka:9092
       CATALOG_URL: http://catalog:8000
       CHECKOUT_URL: http://checkout:8000
       WORKERS: "1"
@@ -261,6 +271,9 @@ services:
       POPULAR_GAP_GRACE_MS: "1000"
     ports:
       - "127.0.0.1:8084:8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
     healthcheck: *service-healthcheck
     networks: [edge, mesh]
 

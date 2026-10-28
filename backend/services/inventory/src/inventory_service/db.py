@@ -22,6 +22,13 @@ SessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     engine, expire_on_commit=False, autoflush=False
 )
 
+# Same pool; for single statements that need no BEGIN/COMMIT (marking an outbox row published).
+autocommit_engine: AsyncEngine = engine.execution_options(isolation_level="AUTOCOMMIT")
+
+AutocommitSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
+    autocommit_engine, expire_on_commit=False, autoflush=False
+)
+
 _PING = text("SELECT 1")
 
 

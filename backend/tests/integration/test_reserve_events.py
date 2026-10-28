@@ -36,12 +36,19 @@ async def test_reserving_twice_reduces_stock_once(reset_db):
     assert await stock() == 97
 
 
-async def test_insufficient_stock_changes_nothing_and_leaves_no_record(reset_db):
+async def test_insufficient_stock_changes_nothing_and_records_the_refusal(reset_db):
     result = await do_reserve(2, [("SKU-000001", 5), ("SKU-000002", 101)])
     assert result == reserve.Short(["SKU-000002"])
     assert await stock() == 100
     async with SessionLocal() as s:
-        assert await s.scalar(text("SELECT count(*) FROM stock_adjustment")) == 0
+        states = [r.state for r in (await s.execute(text("SELECT state FROM stock_adjustment"))).all()]
+    assert states == ["REJECTED"], "spec 008: the refusal is recorded, so it replays"
+    # ...and a repeat replays the same refusal, even if stock has since been replenished.
+    async with SessionLocal() as s:
+        await s.execute(text("UPDATE inventory_stock SET current_stock = 500 WHERE sku = 'SKU-000002'"))
+        await s.commit()
+    assert await do_reserve(2, [("SKU-000001", 5), ("SKU-000002", 101)]) == reserve.Short(["SKU-000002"])
+    assert await stock() == 100, "the replayed refusal took nothing"
 
 
 async def test_unknown_sku_is_short(reset_db):

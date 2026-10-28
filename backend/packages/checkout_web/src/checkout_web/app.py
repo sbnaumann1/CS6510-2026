@@ -21,7 +21,7 @@ def create_service_app(
     routers: list[APIRouter],
     probe: Callable[[], Awaitable[None]],
     lifespan=None,
-    readiness: Mapping[str, Callable[[], bool]] | None = None,
+    readiness: Mapping[str, Callable[[], bool]] | Callable[[], Mapping[str, Callable[[], bool]]] | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title=f"Supermarket Self-Checkout API — {name}",
