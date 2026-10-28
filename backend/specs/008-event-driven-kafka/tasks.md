@@ -189,7 +189,7 @@ description: "Task list for 008 event-driven microservice communication over Kaf
 - [X] T075 [P] Run `uv run python scripts/check_boundaries.py` and the entire `uv run pytest tests -q` once more on a clean checkout of the branch; fix anything that regressed.
 - [X] T076 Walk through [quickstart.md](./quickstart.md) from step 1 to step 7 exactly as written on a fresh machine state (`docker compose down -v` first) and correct any command, path or expectation that is wrong in the quickstart, README or contracts.
 - [X] T077 Update [plan.md](./plan.md) and [research.md](./research.md) with anything learned during implementation (final aiokafka and Kafka versions, measured throughput, any deviation from R1–R15), then commit all work on the feature branch and push it.
-- [ ] T078 Confirm the submission: on the pushed branch's GitHub page verify that `load-client/reports/008-event-driven-kafka/` shows two JSON files and that `backend/docs/architecture.md` renders the diagram; record the repository URL in the load-report README.
+- [X] T078 Confirm the submission: on the pushed branch's GitHub page verify that `load-client/reports/008-event-driven-kafka/` shows two JSON files and that `backend/docs/architecture.md` renders the diagram; record the repository URL in the load-report README.
 
 ---
 

@@ -1,5 +1,7 @@
 # Week 8: event-driven microservices over Kafka (2026-10-27)
 
+Repository: https://github.com/sbnaumann1/CS6510-2026 (branch `worktree-008-kafka-events`).
+
 The two graded load-client reports for [spec 008](../../../backend/specs/008-event-driven-kafka/spec.md),
 run against the compose stack with the **unmodified** load client and the assignment's flags
 (`./run.sh` wraps `java -cp out Main "$@"`):
