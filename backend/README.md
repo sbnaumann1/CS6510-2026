@@ -50,6 +50,105 @@ Thin arrows are HTTP, thick arrows are events. There is no arrow between two ser
 not go through the broker, and the deployment enforces it: no two services share a Docker
 network, so a service cannot even resolve a peer's name.
 
+### Full system view
+
+Everything that runs in [`compose.yaml`](./compose.yaml): the services with their private
+stores and the event machinery inside each, the one-shot jobs, and the networks that keep the
+services apart. Solid arrows are HTTP, thick arrows are events, dotted arrows are one-shot
+setup or failure paths.
+
+```mermaid
+flowchart TB
+    LC(["Load client / shopper"])
+    OPS(["Operator"])
+
+    subgraph EDGE["edge_‹service› networks: gateway ↔ exactly one service each"]
+        GW["API Gateway (nginx)<br/>routes public paths<br/>blocks /internal/*"]
+    end
+    LC -->|"HTTP :8080"| GW
+
+    subgraph CATS["Catalog"]
+        CAT["Catalog API<br/>GET /items<br/>publisher"]
+        CATF[("catalog.csv<br/>read-only volume")]
+        CAT --- CATF
+    end
+
+    subgraph CHKS["Checkout"]
+        CHK["Checkout API<br/>transactions, scans,<br/>completion saga"]
+        CHKX["outbox sweeper · scan relay<br/>recovery loop (lease 10 s)<br/>reply waiter (3 s)"]
+        CHKDB[("checkout-db<br/>PostgreSQL 17<br/>transactions · scans ·<br/>completions · outbox")]
+        CHK --- CHKX
+        CHK --- CHKDB
+        CHKX --- CHKDB
+    end
+
+    subgraph INVS["Inventory"]
+        INV["Inventory API<br/>GET /inventory/low-stock"]
+        INVX["reservation handler<br/>outbox sweeper"]
+        INVDB[("inventory-db<br/>PostgreSQL 17<br/>stock · reservations ·<br/>alerts · outbox")]
+        INV --- INVX
+        INV --- INVDB
+        INVX --- INVDB
+    end
+
+    subgraph ANAS["Analytics (single instance, no database)"]
+        ANA["Analytics API<br/>GET /analytics/popular-items"]
+        PIPE["KafkaScanSource → Window → Aggregation<br/>→ Ranking → Output<br/>in-memory 1 000-scan window"]
+        ANA --- PIPE
+    end
+
+    GW -->|"/items"| CAT
+    GW -->|"/transactions*"| CHK
+    GW -->|"/inventory/*"| INV
+    GW -->|"/analytics/*"| ANA
+    OPS -.->|"docker compose run tools<br/>/internal/reports/*"| GW
+
+    subgraph BUS["bus_‹service› networks: Kafka ↔ exactly one service each"]
+        subgraph K["Kafka: one broker, KRaft, no ZooKeeper"]
+            T1[["catalog.items.v1<br/>compacted · key SKU"]]
+            T2[["checkout.scans.v1<br/>1 partition · 7 d"]]
+            T3[["checkout.completions.v1<br/>6 partitions · key tx id"]]
+            T4[["inventory.stock.v1<br/>6 partitions · key tx id"]]
+            T5[["dead-letters.v1<br/>14 d"]]
+        end
+    end
+
+    CAT ==>|"items + marker<br/>once per start"| T1
+    T1 ==>|"price + name snapshot"| CHK
+    T1 ==>|"name snapshot"| INV
+    T1 ==>|"name snapshot"| ANA
+
+    CHKX ==>|"scan-recorded<br/>(scan table is the outbox)"| T2
+    T2 ==>|"replay last 2 × window<br/>on restart"| PIPE
+
+    CHKX ==>|"stock-reservation-requested<br/>stock-release-requested"| T3
+    T3 ==> INVX
+    INVX ==>|"stock-reserved · stock-rejected<br/>stock-released · reservation-refused"| T4
+    T4 ==>|"reply wakes the<br/>waiting request"| CHKX
+
+    CHK -.->|"5 failed tries"| T5
+    INV -.->|"5 failed tries"| T5
+    ANA -.->|"5 failed tries"| T5
+
+    subgraph JOBS["One-shot jobs (run once, exit 0)"]
+        KI["kafka-init<br/>creates topics from<br/>events/topics.yaml"]
+        SC["seed-catalog"]
+        SK["seed-checkout"]
+        SI["seed-inventory"]
+    end
+    KI -.->|creates| K
+    SC -.->|writes| CATF
+    SK -.->|writes| CHKDB
+    SI -.->|writes| INVDB
+```
+
+How to read it:
+- **Each service owns exactly one store** (a file, a PostgreSQL database, or memory) and the only way in is that service. Seed jobs write only their own service's store.
+- **Checkout and Inventory pair every state change with an outbox row** in one local transaction. The event is published right after the commit, and the sweeper publishes anything left behind, so no event is lost and none is announced without its state change.
+- **Request/reply across services is two events**, keyed by transaction id so both land in one partition. Checkout's HTTP request holds open until the reply event arrives or 3 s pass.
+- **Isolation is topological**: each service sits on its own `edge_‹service›` network (gateway only), its own `bus_‹service›` network (Kafka only), and, for the two databases, its own private data network. No network contains two services.
+- **Start-up order** is only "own seed job and `kafka-init` first". Services never wait for each other; they rebuild from the retained topics when a peer returns.
+
 ## Microservices
 
 | Service | Business function | Endpoints it owns | Its private store |
