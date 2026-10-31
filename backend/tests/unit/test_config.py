@@ -28,6 +28,11 @@ _ENV = (
     "DB_POOL_SIZE",
     "WORKERS",
     "CATALOG_FILE",
+    "KAFKA_BOOTSTRAP",
+    "RESERVE_BUDGET_S",
+    "RELEASE_WAIT_S",
+    "RELAY_GAP_GRACE_MS",
+    "SCAN_POLL_MS",
 )
 
 
@@ -54,7 +59,10 @@ def test_checkout_defaults_match_the_data_model_table(monkeypatch):
     assert fresh.database_url == "postgresql+asyncpg:///checkout_checkout?host=/tmp"
     assert fresh.tx_abandon_minutes == 5
     assert fresh.recovery_lease_s == 10
-    assert fresh.reserve_budget_s == 4
+    assert fresh.reserve_budget_s == 3
+    assert fresh.release_wait_s == 1.5
+    assert fresh.relay_gap_grace_ms == 1000
+    assert fresh.kafka_bootstrap == "kafka:9092"
     assert fresh.db_pool_size == 10
     assert fresh.workers == 6
 

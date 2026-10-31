@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-# Crash recovery under load (spec 007 FR-015, SC-003; quickstart V8).
+# Crash recovery under load (spec 007 FR-015, SC-003; spec 008 FR-014, SC-007; quickstart step 5).
 #
 # Needs the stack running:  docker compose up -d --build --wait
 #
-# Runs shoppers in the background, kills Checkout with `docker kill` (no graceful shutdown)
-# while completions are in flight, brings it back, stops the shoppers, waits for the
-# recovery loop, and requires the cross-store invariant to hold: no transaction left
-# COMPLETING, no completion left mid-saga, stock equal to what was sold.
+# Runs shoppers in the background, kills each target service with `docker kill` (no graceful
+# shutdown) while completions are in flight, brings it back, stops the shoppers, waits for the
+# recovery loop and the outbox sweepers, and requires the cross-store invariant to hold: no
+# transaction left COMPLETING, no completion left mid-saga, stock equal to what was sold, no
+# outbox row left unpublished, Analytics has read every scan.
 #
-#   ./scripts/check_crash_recovery.sh            # 8 shoppers, kill after 6 s
-#   KILLS=3 ./scripts/check_crash_recovery.sh    # kill Checkout three times
+# Spec 008 kills Checkout (the saga's driver, its relay and its outbox) and then Inventory
+# (the consumer of reservation requests, whose events wait on the topic while it is down).
+#
+#   ./scripts/check_crash_recovery.sh                    # 8 shoppers, kill checkout then inventory
+#   TARGETS="checkout" KILLS=3 ./scripts/check_crash_recovery.sh   # kill Checkout three times
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 G=http://localhost:8080
 WORKERS=${WORKERS:-8}
 KILLS=${KILLS:-1}
+TARGETS=${TARGETS:-"checkout inventory"}
 RECOVERY_WAIT=${RECOVERY_WAIT:-25}   # the lease (10 s) plus the loop interval, with margin
 
 wait_healthy() {
@@ -43,14 +48,16 @@ pids=()
 for _ in $(seq 1 "$WORKERS"); do shopper & pids+=($!); done
 echo "$WORKERS shoppers running"
 
-for k in $(seq 1 "$KILLS"); do
-  sleep 6
-  echo "kill $k: docker kill checkout"
-  docker kill "$(docker compose ps -q checkout)" >/dev/null
-  sleep 3
-  docker compose up -d --no-deps checkout >/dev/null 2>&1
-  wait_healthy checkout
-  echo "checkout is back"
+for target in $TARGETS; do
+  for k in $(seq 1 "$KILLS"); do
+    sleep 6
+    echo "kill $k of $target: docker kill $target"
+    docker kill "$(docker compose ps -q "$target")" >/dev/null
+    sleep 3
+    docker compose up -d --no-deps "$target" >/dev/null 2>&1
+    wait_healthy "$target"
+    echo "$target is back"
+  done
 done
 sleep 4
 

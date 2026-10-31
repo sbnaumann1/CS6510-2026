@@ -18,8 +18,10 @@ def _int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
-    catalog_url: str = os.getenv("CATALOG_URL", "http://catalog:8000")
-    checkout_url: str = os.getenv("CHECKOUT_URL", "http://checkout:8000")
+    kafka_bootstrap: str = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
+    # How long the scan consumer waits for new events; an empty poll after the retained tail
+    # has been replayed is what marks the window as rebuilt (scan_source.py).
+    scan_poll_ms: int = _int("SCAN_POLL_MS", 300)
     popular_window_size: int = _int("POPULAR_WINDOW_SIZE", 1000)
     popular_slide_interval: int = _int("POPULAR_SLIDE_INTERVAL", 500)
     # Persistent pipeline (005 research R5-R6): idle sleep of the scan tail, and how long

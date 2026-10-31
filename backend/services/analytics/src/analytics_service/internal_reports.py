@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Response
 from fastapi.responses import ORJSONResponse
 
-from analytics_service import state
+from analytics_service import scan_source, state
 
 router = APIRouter(tags=["internal"])
 
@@ -19,6 +19,7 @@ async def cursor() -> Response:
     return ORJSONResponse(
         content={
             "lastScanId": state.cursor,
+            "highestApplied": scan_source.default_source().highest_applied,
             "windowEnd": latest.window_end if latest is not None else 0,
         }
     )

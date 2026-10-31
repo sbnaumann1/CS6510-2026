@@ -231,3 +231,10 @@ first pair of reports was discarded; the invariant also passed on it.
 `report-20260824-*.json` and `report-20260916-185335.json` predate the backend and were produced
 by `mockserver/MockServer.java` (in-process `ConcurrentHashMap`, no persistence). They are the
 ceiling reference, not a comparable architecture.
+
+## Week 8 — Event-driven microservices over Kafka, 2026-10-27
+
+The two graded reports (default and stress), their comparison with Week 7 (83 % and 82 % of its
+throughput), the per-step breakdown and the failure drills are in
+[`008-event-driven-kafka/README.md`](./008-event-driven-kafka/README.md). The architecture
+diagram is [`backend/docs/architecture.md`](../../backend/docs/architecture.md).

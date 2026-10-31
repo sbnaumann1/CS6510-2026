@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Independent deployability and failure containment (spec 007 US2, US4; FR-004, FR-006,
-# FR-019; SC-005, SC-006; quickstart V7 and V9).
+# Independent deployability and failure containment (spec 007 US2, US4; spec 008 US4;
+# FR-004, FR-006, FR-016, FR-019; SC-008, SC-009; quickstart step 5).
 #
 # Needs the stack running:  docker compose up -d --build --wait
 #
@@ -9,7 +9,9 @@
 # Part 2  For each service: stop it and prove that exactly the routes that depend on it fail,
 #         each with the contract's 503 error shape, and that the rest keep working. Then
 #         restart it and prove the system heals (a refused completion succeeds; Analytics
-#         catches up on scans made while it was down).
+#         catches up on scans made while it was down). Spec 008 adds: a restarted Checkout still
+#         works while Catalog is down (it reads Catalog's retained events), Analytics rebuilds
+#         without Checkout, and Kafka itself can stop and come back.
 #
 #   ./scripts/check_independence.sh
 #   SKIP_CATCHUP=1 ./scripts/check_independence.sh     # skip the 500-scan Analytics drill
@@ -108,6 +110,14 @@ expect "scan (catalog snapshot is warm)"   200 "$(scan "$TX")"
 expect "complete"                          200 "$(status POST "/transactions/$TX/complete" '{}')"
 expect "GET /inventory/low-stock"          200 "$(status GET /inventory/low-stock)"
 expect "GET /analytics/popular-items"      200 "$(status GET /analytics/popular-items)"
+# Spec 008: Checkout and Inventory rebuild their catalog snapshots from Catalog's retained
+# events, so they can restart while Catalog is down and still serve.
+docker compose restart checkout inventory >/dev/null 2>&1
+wait_healthy checkout || true; wait_healthy inventory || true
+TX=$(new_tx)
+expect "restarted Checkout prices a scan (Catalog still down)" 200 "$(scan "$TX")"
+expect "complete (Catalog still down)"      200 "$(status POST "/transactions/$TX/complete" '{}')"
+expect "GET /inventory/low-stock"          200 "$(status GET /inventory/low-stock)"
 docker compose start catalog >/dev/null 2>&1; wait_healthy catalog || true
 
 # -- inventory: completion is refused cleanly and can be retried
@@ -156,7 +166,7 @@ else
   docker compose start analytics >/dev/null 2>&1; wait_healthy analytics || true
 fi
 
-# -- checkout: its own routes fail; Analytics serves what it has, and rebuilds from Checkout
+# -- checkout: its own routes fail; Analytics serves what it has and rebuilds from the topic
 echo " checkout down"
 docker compose stop checkout >/dev/null 2>&1
 expect "GET /items"                        200 "$(status GET /items)"
@@ -164,17 +174,42 @@ expect "GET /inventory/low-stock"          200 "$(status GET /inventory/low-stoc
 expect "GET /analytics/popular-items (serves its last ranking)" 200 "$(status GET /analytics/popular-items)"
 expect "POST /transactions"                503 "$(status POST /transactions '{"stationId":"drill"}')"
 echo " checkout down, analytics restarted meanwhile"
+before=$(body GET /analytics/popular-items | json '["windowEnd"]')
 docker compose restart analytics >/dev/null 2>&1; wait_healthy analytics || true
-end=$(body GET /analytics/popular-items | json '["windowEnd"]')
-expect "Analytics answers with the empty window, not an error" 0 "$end"
-docker compose start checkout >/dev/null 2>&1; wait_healthy checkout || true
+# Spec 008: Analytics reads the scan topic, not Checkout, so it rebuilds its window with
+# Checkout still down.
 ok=0
 for _ in $(seq 1 30); do
   end=$(body GET /analytics/popular-items | json '["windowEnd"]')
-  [ "$end" -gt 0 ] && { ok=1; break; }
+  [ "$end" -ge "$before" ] && [ "$end" -gt 0 -o "$before" -eq 0 ] && { ok=1; break; }
   sleep 1
 done
-[ $ok -eq 1 ] && pass "Analytics rebuilt its window once Checkout was back (windowEnd $end)" \
-              || fail "Analytics did not recover after Checkout returned"
+[ $ok -eq 1 ] && pass "Analytics rebuilt its window from the topic with Checkout down (windowEnd $end)" \
+              || fail "Analytics did not rebuild while Checkout was down (windowEnd ${end:-?}, before $before)"
+docker compose start checkout >/dev/null 2>&1; wait_healthy checkout || true
+expect "Checkout is back: POST /transactions" 201 "$(status POST /transactions '{"stationId":"drill"}')"
+
+# -- kafka: scans and reads keep working; completion fails cleanly; everything heals
+echo " kafka down"
+TX=$(new_tx); scan "$TX" >/dev/null; scan "$TX" SKU-000002 >/dev/null
+docker compose stop kafka >/dev/null 2>&1
+expect "GET /items"                        200 "$(status GET /items)"
+expect "POST /transactions"                201 "$(status POST /transactions '{"stationId":"drill"}')"
+expect "scan"                              200 "$(scan "$TX")"
+expect "GET /inventory/low-stock"          200 "$(status GET /inventory/low-stock)"
+expect "GET /analytics/popular-items"      200 "$(status GET /analytics/popular-items)"
+t0=$(date +%s)
+code=$(status POST "/transactions/$TX/complete" '{}')
+elapsed=$(( $(date +%s) - t0 ))
+expect "complete is refused"               503 "$code"
+[ "$elapsed" -le 5 ] && pass "refusal came within 5 s (${elapsed}s)" || fail "refusal took ${elapsed}s"
+body POST "/transactions/$TX/complete" '{}' | error_shape && pass "refusal has the contract's error shape" || fail "refusal shape"
+docker compose start kafka >/dev/null 2>&1; wait_healthy kafka || true
+ok=0
+for _ in $(seq 1 40); do   # the services reconnect on their own; a retry succeeds once they have
+  [ "$(status POST "/transactions/$TX/complete" '{}')" = 200 ] && { ok=1; break; }
+  sleep 2
+done
+[ $ok -eq 1 ] && pass "the same transaction completes once Kafka is back" || fail "completion did not recover after Kafka returned"
 
 [ $FAILED -eq 0 ] && echo "independence: PASS" || { echo "independence: FAIL" >&2; exit 1; }

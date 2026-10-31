@@ -1,16 +1,17 @@
-# Spec 007: four microservices behind a gateway, each with its own private store.
-# Topology contract: specs/007-microservices-architecture/contracts/compose-topology.md
+# Spec 008: four microservices behind a gateway, each with its own private store, exchanging
+# events through one Kafka broker. No service calls another: they share no network.
+# Topology contracts: specs/008-event-driven-kafka/contracts/compose-topology.md (and 007's).
 #
 #   docker compose up -d --build --wait     # build, seed, start, block until healthy
 #   docker compose down -v                  # tear down, including every store
 #
 # Stores:  checkout-db and inventory-db are PostgreSQL instances, each on its own network
 #          with its own role. Catalog's store is a read-only file on a volume. Analytics has
-#          no store: it keeps derived state in memory and reads Checkout's scan log.
-# Networks: `edge` (gateway to services), `mesh` (service to service), and one private
-#          network per database. A database network has exactly one service on it.
-# Services depend on their own seed job only, never on each other: peers are contacted
-# lazily, so any one service can start while another is down.
+#          no store: it keeps derived state in memory, rebuilt from the scan topic.
+# Networks: edge_<service> (the gateway and that one service), bus_<service> (Kafka and that
+#          one service) and one private network per database. No two services share a network.
+# Services depend on their own seed job and the topic-creation job only, never on each other:
+#          they meet only through Kafka, so any one service can start while another is down.
 
 x-service-healthcheck: &service-healthcheck
   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
@@ -94,6 +95,53 @@ services:
       retries: 30
     networks: [inventory_data]
 
+  # ---- The event broker (spec 008) ------------------------------------------------
+  # One Apache Kafka broker in KRaft mode (no ZooKeeper). Containers reach it at
+  # kafka:9092; the host reaches it at 127.0.0.1:9094 (operator tooling and broker tests).
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,HOST://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms256m
+    ports:
+      - "127.0.0.1:9094:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 10s
+      retries: 40
+      start_period: 10s
+    networks: [bus_catalog, bus_checkout, bus_inventory, bus_analytics]
+
+  # One-shot: creates every topic in events/topics.yaml (events/create-topics.sh is
+  # generated from it by scripts/create_topics.py), then exits 0.
+  kafka-init:
+    image: apache/kafka:3.9.1
+    entrypoint: ["/bin/bash", "/create-topics.sh"]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      - ./events/create-topics.sh:/create-topics.sh:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [bus_catalog]
+    restart: "no"
+
   # ---- One-shot seeds: each writes only its own service's store -------------------
   seed-catalog:
     build:
@@ -145,6 +193,7 @@ services:
       dockerfile: services/catalog/Dockerfile
     image: checkout-catalog
     environment:
+      KAFKA_BOOTSTRAP: kafka:9092
       CATALOG_FILE: /data/catalog.csv
       WORKERS: "2"
     volumes:
@@ -152,10 +201,12 @@ services:
     ports:
       - "127.0.0.1:8081:8000"
     depends_on:
+      kafka-init:
+        condition: service_completed_successfully
       seed-catalog:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
-    networks: [edge, mesh]
+    networks: [edge_catalog, bus_catalog]
 
   checkout:
     build:
@@ -163,9 +214,8 @@ services:
       dockerfile: services/checkout/Dockerfile
     image: checkout-checkout
     environment:
+      KAFKA_BOOTSTRAP: kafka:9092
       DATABASE_URL: postgresql+asyncpg://${CHECKOUT_DB_USER:-checkout_user}:${CHECKOUT_DB_PASSWORD:-checkout_pass}@checkout-db:5432/checkout
-      CATALOG_URL: http://catalog:8000
-      INVENTORY_URL: http://inventory:8000
       WORKERS: "6"
       DB_POOL_SIZE: "10"
       TX_ABANDON_MINUTES: ${TX_ABANDON_MINUTES:-5}
@@ -173,10 +223,12 @@ services:
     ports:
       - "127.0.0.1:8082:8000"
     depends_on:
+      kafka-init:
+        condition: service_completed_successfully
       seed-checkout:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
-    networks: [edge, mesh, checkout_data]
+    networks: [edge_checkout, bus_checkout, checkout_data]
 
   inventory:
     build:
@@ -184,18 +236,20 @@ services:
       dockerfile: services/inventory/Dockerfile
     image: checkout-inventory
     environment:
+      KAFKA_BOOTSTRAP: kafka:9092
       DATABASE_URL: postgresql+asyncpg://${INVENTORY_DB_USER:-inventory_user}:${INVENTORY_DB_PASSWORD:-inventory_pass}@inventory-db:5432/inventory
-      CATALOG_URL: http://catalog:8000
       WORKERS: "2"
       DB_POOL_SIZE: "8"
       LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-50}
     ports:
       - "127.0.0.1:8083:8000"
     depends_on:
+      kafka-init:
+        condition: service_completed_successfully
       seed-inventory:
         condition: service_completed_successfully
     healthcheck: *service-healthcheck
-    networks: [edge, mesh, inventory_data]
+    networks: [edge_inventory, bus_inventory, inventory_data]
 
   # Exactly one instance: no database, no volume, no replicas (it keeps its window in
   # memory and writes nothing shared, so there is nothing to elect a leader for).
@@ -205,8 +259,7 @@ services:
       dockerfile: services/analytics/Dockerfile
     image: checkout-analytics
     environment:
-      CATALOG_URL: http://catalog:8000
-      CHECKOUT_URL: http://checkout:8000
+      KAFKA_BOOTSTRAP: kafka:9092
       WORKERS: "1"
       POPULAR_WINDOW_SIZE: "1000"
       POPULAR_SLIDE_INTERVAL: "500"
@@ -214,8 +267,11 @@ services:
       POPULAR_GAP_GRACE_MS: "1000"
     ports:
       - "127.0.0.1:8084:8000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
     healthcheck: *service-healthcheck
-    networks: [edge, mesh]
+    networks: [edge_analytics, bus_analytics]
 
   gateway:
     build:
@@ -238,7 +294,7 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
-    networks: [edge]
+    networks: [edge_catalog, edge_checkout, edge_inventory, edge_analytics]
 
   # On-demand: docker compose run --rm tools
   # Asks each service for its own report over the mesh; it opens no database.
@@ -248,15 +304,26 @@ services:
       dockerfile: tools/Dockerfile
     image: checkout-tools
     profiles: ["tools"]
-    networks: [mesh]
+    networks: [edge_catalog, edge_checkout, edge_inventory, edge_analytics]
 
 networks:
-  edge: {}
-  mesh: {}
+  # Spec 008: no two microservices share a network, so a service that tried to call a peer
+  # could not even resolve its name. The only thing every service can reach is Kafka (on its own
+  # bus_<service> network), and the only thing that can reach a service is the gateway (on its
+  # edge_<service> network). See contracts/compose-topology.md.
+  edge_catalog: {}
+  edge_checkout: {}
+  edge_inventory: {}
+  edge_analytics: {}
+  bus_catalog: {}
+  bus_checkout: {}
+  bus_inventory: {}
+  bus_analytics: {}
   checkout_data: {}
   inventory_data: {}
 
 volumes:
+  kafka_data:
   checkout_pgdata:
   inventory_pgdata:
   catalog_data:

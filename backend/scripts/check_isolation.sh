@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Private-store isolation check (spec 007 FR-007, FR-008; quickstart V4).
+# Isolation check (spec 007 FR-007, FR-008; spec 008 FR-002, SC-002; quickstart step 3).
 #
 # Needs the stack running:  docker compose up -d --build --wait
 #
 # Proves, from inside the running containers, that:
+#   - no service can even resolve another service (they share no network), so the only
+#     path between services is the Kafka broker, which every service can reach
 #   - no service can reach another service's database (they are not on its network)
 #   - Checkout and Inventory can reach their own
 #   - only Catalog sees the catalog file, and not even Catalog can write it
@@ -20,6 +22,33 @@ reach() {  # <service> <host> -> exit 0 if the service can open a TCP connection
   docker compose exec -T "$1" python -c \
     "import socket,sys; socket.create_connection(('$2', 5432), 2)" >/dev/null 2>&1
 }
+
+resolves() {  # <service> <host> -> exit 0 if the service can resolve the host name
+  docker compose exec -T "$1" python -c \
+    "import socket,sys; socket.getaddrinfo('$2', 8000)" >/dev/null 2>&1
+}
+
+echo "No service can reach another service (no shared network)"
+for svc in catalog checkout inventory analytics; do
+  for peer in catalog checkout inventory analytics; do
+    [ "$svc" = "$peer" ] && continue
+    if resolves "$svc" "$peer"; then
+      bad "$svc can resolve $peer: services must meet only through Kafka"
+    else
+      ok "$svc cannot resolve $peer"
+    fi
+  done
+done
+
+echo "Every service can reach the broker"
+for svc in catalog checkout inventory analytics; do
+  if docker compose exec -T "$svc" python -c \
+       "import socket; socket.create_connection(('kafka', 9092), 3)" >/dev/null 2>&1; then
+    ok "$svc -> kafka:9092"
+  else
+    bad "$svc cannot reach kafka:9092"
+  fi
+done
 
 echo "Databases reachable only by their owner"
 for svc in catalog checkout inventory analytics; do

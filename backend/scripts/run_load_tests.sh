@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # Run the graded load-client reports end to end against the compose stack
-# (spec 007 FR-025; spec 005 FR-017, research R14): fresh stack, load it, verify the invariant —
-# once per run.
+# (spec 008 FR-022, SC-003, SC-004; spec 007 FR-025; spec 005 FR-017, research R14): fresh stack,
+# load it, verify the invariant (stock, completions, outbox, scans) — once per run.
 #
 # Usage:
 #   ./scripts/run_load_tests.sh [default|stress|all]    (default: all; `normal` = default)
 #   STOCK_PER_ITEM=200000 ./scripts/run_load_tests.sh default   # no stock-outs (001 V7)
-#   REPORT_DIR=other-name ./scripts/run_load_tests.sh all   # reports subdirectory (default 007-microservices-architecture)
+#   REPORT_DIR=other-name ./scripts/run_load_tests.sh all   # reports subdirectory (default 008-event-driven-kafka)
 #
 # Every run starts from `docker compose down -v`, so the database is seeded
 # fresh. The load client runs on the host with exactly the assignment's flags:
 #   default:  ./run.sh
 #   stress:   ./run.sh --stations=100 --duration=120
-# Each report is moved into load-client/reports/007-microservices-architecture/, and the
+# Each report is moved into load-client/reports/008-event-driven-kafka/, and the
 # stack is left running after the last run for the pre-push review.
 set -euo pipefail
 
 BACKEND="$(cd "$(dirname "$0")/.." && pwd)"
 CLIENT="$BACKEND/../load-client"
 REPORTS="$CLIENT/reports"
-OUT="$REPORTS/${REPORT_DIR:-007-microservices-architecture}"
+OUT="$REPORTS/${REPORT_DIR:-008-event-driven-kafka}"
 MODE="${1:-all}"
 FAILED=0
 
@@ -87,14 +87,17 @@ exit "$FAILED"
 #   # Default run: 10 stations, 60 s
 #   docker compose down -v && docker compose up -d --build --wait
 #   cd ../load-client && ./build.sh && ./run.sh
-#   mv reports/report-*.json reports/007-microservices-architecture/
+#   mv reports/report-*.json reports/008-event-driven-kafka/
 #   cd ../backend && docker compose --profile tools run --rm --build tools
 #
 #   # Stress run: 100 stations, 120 s
 #   docker compose down -v && docker compose up -d --build --wait
 #   cd ../load-client && ./run.sh --stations=100 --duration=120
-#   mv reports/report-*.json reports/007-microservices-architecture/
+#   mv reports/report-*.json reports/008-event-driven-kafka/
 #   cd ../backend && docker compose --profile tools run --rm --build tools
 #
 # Optional no-stock-out variant (001 V7): prefix the up step with STOCK_PER_ITEM=200000
+#
+# The reports are the load client's JSON output, unchanged: the two files graded for spec 008
+# are the default run and `java -cp out Main --stations=100 --duration=120` (./run.sh wraps it).
 # ---------------------------------------------------------------------------

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "dead-letter payload (the envelope's `data`)",
+  "type": "object",
+  "properties": {
+    "sourceTopic": {
+      "type": "string",
+      "minLength": 1
+    },
+    "partition": {
+      "type": "integer"
+    },
+    "offset": {
+      "type": "integer"
+    },
+    "consumer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "error": {
+      "type": "string"
+    },
+    "event": {}
+  },
+  "required": [
+    "sourceTopic",
+    "partition",
+    "offset",
+    "consumer",
+    "attempts",
+    "error",
+    "event"
+  ],
+  "additionalProperties": true
+}

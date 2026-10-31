@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+import orjson
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from checkout_web.events import Event
 
 _INSERT_TX = text(
     "INSERT INTO transaction (station_id) VALUES (:station_id)"
@@ -265,3 +268,96 @@ async def completing_count(session: AsyncSession) -> int:
 
 async def open_completions(session: AsyncSession) -> int:
     return int(await session.scalar(_OPEN_COMPLETIONS) or 0)
+
+
+# --- outbox and scan relay (spec 008) -------------------------------------------------
+
+_INSERT_OUTBOX = text(
+    "INSERT INTO outbox (topic, key, event_id, payload)"
+    " VALUES (:topic, :key, CAST(:event_id AS uuid), CAST(:payload AS jsonb))"
+)
+_MARK_PUBLISHED = text(
+    "UPDATE outbox SET published_at = now()"
+    " WHERE event_id = CAST(:event_id AS uuid) AND published_at IS NULL"
+)
+# SKIP LOCKED: several workers run the sweeper and each takes different rows.
+_CLAIM_UNPUBLISHED = text(
+    "SELECT id, topic, key, payload, event_id::text AS event_id FROM outbox"
+    " WHERE published_at IS NULL AND created_at < now() - make_interval(secs => :age)"
+    " ORDER BY id LIMIT :n FOR UPDATE SKIP LOCKED"
+)
+_DELETE_PUBLISHED = text(
+    "DELETE FROM outbox WHERE published_at IS NOT NULL"
+    " AND published_at < now() - make_interval(hours => :hours)"
+)
+_UNPUBLISHED_COUNT = text(
+    "SELECT count(*) FROM outbox WHERE published_at IS NULL"
+    " AND created_at < now() - make_interval(secs => :age)"
+)
+
+# One row, one writer: the relay holds an advisory lock while it publishes.
+_RELAY_LOCK = text("SELECT pg_try_advisory_lock(80081001)")
+_RELAY_UNLOCK = text("SELECT pg_advisory_unlock(80081001)")
+_RELAY_STATE = text(
+    "SELECT last_published_scan_id, log_token FROM relay_state WHERE id = 1"
+)
+_RELAY_SAVE = text(
+    "INSERT INTO relay_state (id, last_published_scan_id, log_token)"
+    " VALUES (1, :pos, :token)"
+    " ON CONFLICT (id) DO UPDATE SET last_published_scan_id = :pos, log_token = :token"
+)
+_RELAY_BATCH = text(
+    "SELECT id, transaction_id, sku FROM transaction_item"
+    " WHERE id > :after ORDER BY id LIMIT :limit"
+)
+
+
+async def insert_outbox(session: AsyncSession, topic: str, key: str, event: Event) -> None:
+    await session.execute(
+        _INSERT_OUTBOX,
+        {
+            "topic": topic,
+            "key": key,
+            "event_id": event.event_id,
+            "payload": orjson.dumps(event.to_dict()).decode(),
+        },
+    )
+
+
+async def mark_published(session: AsyncSession, event_id: str) -> None:
+    await session.execute(_MARK_PUBLISHED, {"event_id": event_id})
+
+
+async def claim_unpublished(
+    session: AsyncSession, age_s: float = 2.0, limit: int = 100
+) -> Sequence[Row]:
+    return (await session.execute(_CLAIM_UNPUBLISHED, {"age": age_s, "n": limit})).all()
+
+
+async def delete_published_older_than(session: AsyncSession, hours: int = 1) -> int:
+    return (await session.execute(_DELETE_PUBLISHED, {"hours": hours})).rowcount or 0
+
+
+async def unpublished_count(session: AsyncSession, age_s: float = 2.0) -> int:
+    return int(await session.scalar(_UNPUBLISHED_COUNT, {"age": age_s}) or 0)
+
+
+async def relay_try_lock(session: AsyncSession) -> bool:
+    return bool(await session.scalar(_RELAY_LOCK))
+
+
+async def relay_unlock(session: AsyncSession) -> None:
+    await session.execute(_RELAY_UNLOCK)
+
+
+async def relay_state(session: AsyncSession) -> tuple[int, str]:
+    row = (await session.execute(_RELAY_STATE)).first()
+    return (int(row.last_published_scan_id), row.log_token) if row else (0, "")
+
+
+async def relay_save(session: AsyncSession, pos: int, token: str) -> None:
+    await session.execute(_RELAY_SAVE, {"pos": pos, "token": token})
+
+
+async def relay_batch(session: AsyncSession, after: int, limit: int) -> Sequence[Row]:
+    return (await session.execute(_RELAY_BATCH, {"after": after, "limit": limit})).all()

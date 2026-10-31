@@ -31,9 +31,14 @@ async def sold_by_sku(session: AsyncSession = Depends(get_autocommit_session)) -
 
 @router.get("/internal/reports/scan-count")
 async def scan_count(session: AsyncSession = Depends(get_autocommit_session)) -> Response:
+    position, _ = await repo.relay_state(session)
     return ORJSONResponse(
         content={
             "scans": await repo.scan_count(session),
             "maxScanId": await repo.max_scan_id(session),
+            # Spec 008 FR-021: every committed scan has been published, and no event of
+            # Checkout's is waiting in the outbox.
+            "relayPosition": position,
+            "unpublishedOutbox": await repo.unpublished_count(session),
         }
     )

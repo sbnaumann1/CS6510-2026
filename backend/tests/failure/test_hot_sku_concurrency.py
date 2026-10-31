@@ -1,5 +1,7 @@
 """Many concurrent completions that all want the hot SKU never oversell it, and the stores
-agree afterwards (spec 006: SKU-000001 is in about two thirds of baskets)."""
+agree afterwards (spec 006: SKU-000001 is in about two thirds of baskets). Since spec 008 the
+completions race through Kafka: requests and replies interleave, and Inventory handles
+different transactions concurrently."""
 
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ async def test_fifty_baskets_race_for_the_last_units(client, session):
     await assert_consistent()
     for tx, r in zip(txs, results):
         if r.status_code == 409:
-            assert await adjustment_states(tx) == [], "a refused basket leaves no reservation"
+            assert await adjustment_states(tx) == [(1, "REJECTED")], "a refused basket moves no stock"
 
 
 async def test_overlapping_baskets_do_not_deadlock_through_the_saga(client):

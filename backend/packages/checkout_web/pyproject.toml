@@ -1,14 +1,14 @@
 [project]
 name = "checkout-web"
-version = "0.7.0"
-description = "Shared HTTP conventions: contract error shape, request parsing, app factory, health check, money, request id, service client"
+version = "0.8.0"
+description = "Shared conventions: contract error shape, request parsing, app factory, health check, money, request id, event envelope, bus and consumer loop"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.104.1",
     "uvicorn[standard]==0.24.0",
     "orjson==3.9.10",
     "pydantic==2.5.0",
-    "httpx==0.25.2",
+    "aiokafka==0.14.0",
 ]
 
 [build-system]

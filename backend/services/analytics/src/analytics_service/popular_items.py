@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from analytics_service import state
-from analytics_service.catalog_client import get_snapshot
+from analytics_service.catalog_snapshot import get_snapshot
 from analytics_service.config import settings
 
 # Top 200 covers any sane ?limit=; names and rank are attached at read time, so the

@@ -7,7 +7,8 @@ the adjustment keyed by the transaction id. The hot-SKU stock locks are held for
 one statement plus COMMIT, and are gone before Checkout finalizes the transaction.
 
 The adjustment row is the idempotency record: a repeated `reserve` returns the
-recorded result without a second decrement, and `release` leaves a record (even when
+recorded result without a second decrement (a refusal for insufficient stock is recorded
+too, as REJECTED, so it replays the same answer), and `release` leaves a record (even when
 there was nothing to undo) so a `reserve` that arrives after it is refused.
 
 Neither function commits or begins a transaction. The caller owns the boundary.
@@ -89,6 +90,14 @@ _LOCK_ADJUSTMENT = text(
     " WHERE transaction_id = :tx_id AND epoch = :epoch FOR UPDATE"
 )
 
+# A refusal is recorded too, so a repeated request replays the same answer (spec 008). The
+# `lines` of a REJECTED row name the short SKUs.
+_RECORD_REJECTED = text(
+    "INSERT INTO stock_adjustment (transaction_id, epoch, state, lines)"
+    " VALUES (:tx_id, :epoch, 'REJECTED', CAST(:lines AS jsonb))"
+    " ON CONFLICT (transaction_id, epoch) DO NOTHING"
+)
+
 _TOMBSTONE = text(
     "INSERT INTO stock_adjustment (transaction_id, epoch, state, lines)"
     " VALUES (:tx_id, :epoch, 'RELEASED', CAST('[]' AS jsonb))"
@@ -147,11 +156,15 @@ def _normalize(lines: Sequence[tuple[str, int]]) -> list[tuple[str, int]]:
 
 async def _recorded(
     session: AsyncSession, tx_id: int, epoch: int
-) -> Reserved | AlreadyReleased | None:
+) -> Reserved | Short | AlreadyReleased | None:
     row = (await session.execute(_GET_ADJUSTMENT, {"tx_id": tx_id, "epoch": epoch})).first()
     if row is None:
         return None
-    return Reserved(replayed=True) if row.state == "APPLIED" else AlreadyReleased()
+    if row.state == "APPLIED":
+        return Reserved(replayed=True)
+    if row.state == "REJECTED":
+        return Short([e["sku"] for e in row.lines])
+    return AlreadyReleased()
 
 
 async def reserve(
@@ -177,9 +190,22 @@ async def reserve(
     }
     res = (await session.execute(_RESERVE, params)).one()
     if res.prior_state is not None:
-        return Reserved(replayed=True) if res.prior_state == "APPLIED" else AlreadyReleased()
+        if res.prior_state == "APPLIED":
+            return Reserved(replayed=True)
+        if res.prior_state == "REJECTED":
+            return await _recorded(session, tx_id, epoch)  # replay the same refusal
+        return AlreadyReleased()
     if not res.ok:
-        return Short(list(res.short or []))
+        short = list(res.short or [])
+        await session.execute(
+            _RECORD_REJECTED,
+            {
+                "tx_id": tx_id,
+                "epoch": epoch,
+                "lines": orjson.dumps([{"sku": sku, "short": True} for sku in short]).decode(),
+            },
+        )
+        return Short(short)
     return Reserved(replayed=False)
 
 
@@ -213,6 +239,10 @@ async def release(session: AsyncSession, tx_id: int, *, epoch: int = 1) -> Relea
     row = (await session.execute(_LOCK_ADJUSTMENT, {"tx_id": tx_id, "epoch": epoch})).one()
     if row.state == "RELEASED":
         return Released(units_restored=0, already_released=True)
+    if row.state == "REJECTED":
+        # Nothing was taken. Record the release so a late reserve of this epoch is refused.
+        await session.execute(_MARK_RELEASED, {"tx_id": tx_id, "epoch": epoch})
+        return Released(units_restored=0, already_released=False)
 
     lines = _normalize([(e["sku"], int(e["qty"])) for e in row.lines])
     await session.execute(

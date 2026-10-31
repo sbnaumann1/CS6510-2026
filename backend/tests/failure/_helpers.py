@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from checkout_web import events as ev
+
 from checkout_service.db import SessionLocal as CheckoutSessionLocal
 from inventory_service.db import SessionLocal as InventorySessionLocal
 
@@ -113,3 +115,45 @@ async def completion_state(tx: str) -> tuple[int, str] | None:
             )
         ).first()
     return None if row is None else (row.epoch, row.state)
+
+
+# --- event predicates for MemoryBus fault hooks (stack.bus.drop / duplicate / delay / ...) ---
+
+
+def of_type(*types: str):
+    """Matches events of these types: `stack.bus.drop(of_type(ev.STOCK_RESERVED))`."""
+    return lambda topic, event, key: event.type in types
+
+
+def for_tx(tx: str, *types: str):
+    """Matches events about one transaction (and, if given, of these types)."""
+    return lambda topic, event, key: (
+        event.data.get("transactionId") == tx and (not types or event.type in types)
+    )
+
+
+RESERVATION_REQUESTS = of_type(ev.STOCK_RESERVATION_REQUESTED)
+RELEASE_REQUESTS = of_type(ev.STOCK_RELEASE_REQUESTED)
+REPLIES = of_type(ev.STOCK_RESERVED, ev.STOCK_REJECTED, ev.STOCK_RELEASED, ev.RESERVATION_REFUSED)
+
+
+async def wait_until(pred, timeout: float = 5.0, what: str = "condition"):
+    """Poll `pred()` (sync or async) until it is truthy; fail loudly rather than hang."""
+    import asyncio
+    import inspect
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        value = pred()
+        if inspect.isawaitable(value):
+            value = await value
+        if value:
+            return value
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        await asyncio.sleep(0.01)
+
+
+async def adjustment_states_are(tx: str, expected: list) -> bool:
+    """For wait_until: have Inventory's adjustment records for `tx` reached `expected`?"""
+    return await adjustment_states(tx) == expected

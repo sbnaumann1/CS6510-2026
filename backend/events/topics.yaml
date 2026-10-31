@@ -1,0 +1,52 @@
+# Broker topology and declared producers/consumers (spec 008, contracts/events.md).
+#
+# Read by: scripts/create_topics.py (kafka-init creates every topic from this file),
+#          scripts/check_boundaries.py (rules E3-E6: code must match these declarations),
+#          tests/unit/test_events.py (checkout_web.events.TOPICS must equal this file).
+#
+# partitions    number of partitions
+# compact       true: log-compacted (latest record per key kept forever); false: delete by time
+# retention_ms  time-based retention for non-compacted topics
+# producer      the one service that owns the topic ("*" = any consumer, dead letters only)
+# consumers     services that read it
+# key           what the Kafka message key is
+
+topics:
+  catalog.items.v1:
+    partitions: 1
+    compact: true
+    producer: catalog
+    consumers: [checkout, inventory, analytics]
+    key: "SKU (the marker uses __marker__)"
+
+  checkout.scans.v1:
+    partitions: 1
+    compact: false
+    retention_ms: 604800000   # 7 days
+    producer: checkout
+    consumers: [analytics]
+    key: "none (log order = scan id order)"
+
+  checkout.completions.v1:
+    partitions: 6
+    compact: false
+    retention_ms: 86400000    # 1 day
+    producer: checkout
+    consumers: [inventory]
+    key: "transaction id"
+
+  inventory.stock.v1:
+    partitions: 6
+    compact: false
+    retention_ms: 86400000    # 1 day
+    producer: inventory
+    consumers: [checkout]
+    key: "transaction id"
+
+  dead-letters.v1:
+    partitions: 1
+    compact: false
+    retention_ms: 1209600000  # 14 days
+    producer: "*"
+    consumers: []
+    key: "source topic"

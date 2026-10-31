@@ -1,7 +1,7 @@
 """Checkout Service business logic: start, scan, complete, read.
 
-The scan path is one CTE round trip (001 research R9) and, once the catalog snapshot is
-warm, makes no call to any other service. Completion is the saga in saga.py: stock lives
+The scan path is one CTE round trip (001 research R9) and prices from the catalog snapshot
+(built from Catalog's events, spec 008), so it calls no other service. Completion is the saga in saga.py: stock lives
 in Inventory (spec 007), so completing a basket is a coordinated update of two stores.
 """
 
@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from checkout_service import catalog_client, repo, saga
+from checkout_service import catalog_snapshot, repo, saga
 from checkout_web.errors import (
     SKU_NOT_FOUND,
     TRANSACTION_NOT_FOUND,
@@ -60,7 +60,7 @@ async def scan_item(session: AsyncSession, tx_id: int, sku: str) -> dict[str, An
     """
     # Resolved from the catalog snapshot before any database work, so SKU_NOT_FOUND
     # precedes TRANSACTION_NOT_OPEN (error-catalog.md precedence).
-    entry = await catalog_client.get_snapshot().get(sku)
+    entry = await catalog_snapshot.get_snapshot().get(sku)
     if entry is None:
         raise ApiError(SKU_NOT_FOUND, f"SKU {sku} was not found.")
     name, price_cents = entry

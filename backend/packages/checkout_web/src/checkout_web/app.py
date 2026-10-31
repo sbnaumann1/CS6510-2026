@@ -6,7 +6,7 @@ error-catalog handlers, and a /healthz endpoint backed by its own probe.
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Mapping
 
 from fastapi import APIRouter, FastAPI
 from fastapi.responses import ORJSONResponse
@@ -21,6 +21,7 @@ def create_service_app(
     routers: list[APIRouter],
     probe: Callable[[], Awaitable[None]],
     lifespan=None,
+    readiness: Mapping[str, Callable[[], bool]] | Callable[[], Mapping[str, Callable[[], bool]]] | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title=f"Supermarket Self-Checkout API — {name}",
@@ -32,5 +33,5 @@ def create_service_app(
     app.add_middleware(RequestIdMiddleware)
     for router in routers:
         app.include_router(router)
-    app.include_router(health_router(name, probe))
+    app.include_router(health_router(name, probe, readiness))
     return app
