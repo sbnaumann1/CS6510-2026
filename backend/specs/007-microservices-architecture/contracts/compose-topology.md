@@ -65,7 +65,7 @@ nothing shared, but two instances would only duplicate work ([research R5](../re
 
 `synchronous_commit=off`, `wal_compression=on`, `checkpoint_timeout=15min`, `max_wal_size=2GB`.
 `shared_buffers`: checkout 512 MB, inventory 128 MB.
-`max_connections`: checkout 100, inventory 60. Each must exceed
+`max_connections`: checkout 150 (100 until spec 009 raised Checkout's pool from 10 to 16 per worker), inventory 60. Each must exceed
 `workers × pool_size` of its service plus seed and report slack.
 
 ## Independence checks

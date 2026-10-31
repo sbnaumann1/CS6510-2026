@@ -25,7 +25,8 @@ from checkout_service import (
     sweeper,
 )
 from checkout_service.config import settings
-from checkout_service.db import dispose_engine, ping
+from checkout_service.db import dispose_engine, engine, ping
+from checkout_web import diagnostics
 from checkout_web.app import create_service_app
 from checkout_web.lifecycle import cancel_and_wait
 from checkout_web.bus import Bus, KafkaBus
@@ -81,6 +82,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(_sweep_loop(), name="sweeper"),
         asyncio.create_task(recovery.recovery_loop(), name="recovery"),
+        asyncio.create_task(diagnostics.monitor(engine), name="diagnostics"),
     ]
     try:
         yield
