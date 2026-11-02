@@ -6,9 +6,16 @@
 set -u
 OUT="$1"; STOP="$2"; MAX="${3:-600}"
 : > "$OUT"
+: > "${OUT%.csv}.locks.csv"
 end=$((SECONDS + MAX))
 while [ ! -e "$STOP" ] && [ $SECONDS -lt $end ]; do
   now=$(date +%s)
   docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemPerc}}' 2>/dev/null \
     | sed 's/%//g' | awk -F, -v t="$now" 'NF==3 {print t","$1","$2","$3}' >> "$OUT"
+  # backends in inventory-db waiting on a lock right now (the hot-SKU row locks)
+  locks=$(docker compose exec -T -e PGPASSWORD="${INVENTORY_DB_PASSWORD:-inventory_pass}" inventory-db \
+    psql -h 127.0.0.1 -U "${INVENTORY_DB_USER:-inventory_user}" -d inventory -Atc \
+    "SELECT count(*) FROM pg_stat_activity WHERE datname='inventory' AND wait_event_type='Lock'" \
+    </dev/null 2>/dev/null || true)
+  [ -n "$locks" ] && echo "$now,$locks" >> "${OUT%.csv}.locks.csv"
 done

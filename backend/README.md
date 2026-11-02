@@ -309,6 +309,22 @@ Reading it:
 - **Not on the path:** Inventory's "mark outbox row published" write (1.1 ms) and Checkout's equivalent run after the reply is on its way, so they delay nothing the shopper waits for, though in Inventory the write holds a handler slot until it finishes.
 - The raw logs and per-config breakdowns are in `logs/profile/`, run with `./scripts/run_profile.sh`.
 
+### Performance work (spec 009)
+
+The completion path above, the profiling tooling that produced it (`TRACE_TIMING=1`,
+`scripts/run_profile.sh`) and every experiment, including what did not help, are written up in
+[`docs/009-optimization-findings.md`](./docs/009-optimization-findings.md). What shipped:
+
+- **Scan fast path** (`checkout_service/hotpath.py`, `fastdb.py`): start and scan are served by
+  raw-ASGI handlers in front of FastAPI and run their single statement through a bare asyncpg
+  pool. Same contract, same errors; `tests/integration/test_hotpath.py` checks each request
+  against the FastAPI route. `CHECKOUT_FASTPATH=0` switches it off.
+- Checkout's Kafka producer lingers 0 ms; replies are filtered by record key before decoding; the
+  gateway recycles Checkout upstream connections after 200 requests.
+- Graded result against the Week 8 code in the same session: **180.3 tx/s** at 10 stations
+  (+12.5 %) and **168.0 tx/s** at 100 (+9.8 %); see
+  [`load-client/reports/009-kafka-optimization/`](../load-client/reports/009-kafka-optimization/README.md).
+
 ## Analytics: an in-memory pipeline fed by the scan topic
 
 ```text

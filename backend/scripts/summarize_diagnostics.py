@@ -55,6 +55,16 @@ def main(prefix: str) -> int:
         print(f"  TOTAL (busier half of the samples): mean={statistics.mean(top) / 100:5.2f} cores,"
               f" max={max(busy) / 100:5.2f}\n")
 
+    try:
+        with open(prefix + ".stats.locks.csv") as fh:
+            waits = [int(row[1]) for row in csv.reader(fh) if len(row) == 2]
+        if waits:
+            print(f"inventory-db backends waiting on a lock ({len(waits)} samples, one per second): "
+                  f"mean={statistics.mean(waits):.2f} max={max(waits)} "
+                  f"nonzero in {sum(1 for w in waits if w) / len(waits):.0%} of samples\n")
+    except FileNotFoundError:
+        pass
+
     mon: dict[tuple[str, int], list[dict]] = defaultdict(list)
     with open(prefix + ".log", errors="replace") as fh:
         for line in fh:
