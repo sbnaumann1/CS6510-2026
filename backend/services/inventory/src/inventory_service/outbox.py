@@ -16,6 +16,7 @@ import logging
 from checkout_web.bus import Transient
 from checkout_web.events import Event, from_dict
 from checkout_web.request import log_step
+from checkout_web.trace import trace
 from inventory_service import eventbus, repo
 from inventory_service.db import AutocommitSessionLocal, SessionLocal
 
@@ -35,6 +36,7 @@ async def publish_now(topic: str, key: str, event: Event) -> bool:
     except Transient as exc:
         log_step("publish", outcome="deferred", tx=key, topic=topic, type=event.type, error=str(exc))
         return False
+    trace("inv-publish-acked", key, type=event.type)
     try:
         async with AutocommitSessionLocal() as session:
             await repo.mark_published(session, event.event_id)

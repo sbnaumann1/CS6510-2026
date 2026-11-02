@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from checkout_service import catalog_snapshot, repo, saga
+from checkout_service import catalog_snapshot, fastdb, repo, saga
 from checkout_web.errors import (
     SKU_NOT_FOUND,
     TRANSACTION_NOT_FOUND,
@@ -37,10 +37,8 @@ def public_id(tx_id: int) -> str:
 
 
 async def start_transaction(session: AsyncSession, station_id: str) -> dict[str, Any]:
-    """Runs on an autocommit session (spec 006 R2): the INSERT commits on its own and
-    the commit() below is a no-op, kept so the function is correct on either kind."""
+    """Runs on an autocommit session (spec 006 R2): the INSERT commits on its own."""
     row = await repo.insert_transaction(session, station_id)
-    await session.commit()
     return {
         "transactionId": public_id(row.id),
         "stationId": station_id,
@@ -55,8 +53,8 @@ async def scan_item(session: AsyncSession, tx_id: int, sku: str) -> dict[str, An
     """Returns the ScanResult body.
 
     Runs on an autocommit session (spec 006 R2): the scan CTE is one atomic statement, so
-    rollback()/commit() below are no-ops there. On the not-open path nothing needs
-    undoing: the CTE's `WHERE status = 'OPEN'` matched no row.
+    there is nothing to commit or roll back. On the not-open path nothing needs undoing: the
+    CTE's `WHERE status = 'OPEN'` matched no row.
     """
     # Resolved from the catalog snapshot before any database work, so SKU_NOT_FOUND
     # precedes TRANSACTION_NOT_OPEN (error-catalog.md precedence).
@@ -68,10 +66,8 @@ async def scan_item(session: AsyncSession, tx_id: int, sku: str) -> dict[str, An
     row = await repo.scan_item(session, tx_id, sku, price_cents)
 
     if row is None:
-        await session.rollback()
         await _raise_not_open_or_missing(session, tx_id)
 
-    await session.commit()
     return {
         "transactionId": public_id(tx_id),
         "sku": sku,
@@ -79,6 +75,45 @@ async def scan_item(session: AsyncSession, tx_id: int, sku: str) -> dict[str, An
         "unitPrice": cents_to_amount(price_cents),
         "itemCount": row.item_count,
         "runningTotal": cents_to_amount(row.running_total_cents),
+    }
+
+
+async def fast_start_transaction(station_id: str) -> dict[str, Any]:
+    """`start_transaction` on the asyncpg hot path (hotpath.py): the same statement and body."""
+    row = await fastdb.fetchrow(fastdb.START, station_id)
+    return {
+        "transactionId": public_id(row["id"]),
+        "stationId": station_id,
+        "status": "OPEN",
+        "itemCount": row["item_count"],
+        "runningTotal": cents_to_amount(row["running_total_cents"]),
+        "startedAt": row["started_at"].isoformat(),
+    }
+
+
+async def fast_scan_item(tx_id: int, sku: str) -> dict[str, Any]:
+    """`scan_item` on the asyncpg hot path: same precedence (unknown SKU before a transaction
+    that is not open), same statement, same body."""
+    entry = await catalog_snapshot.get_snapshot().get(sku)
+    if entry is None:
+        raise ApiError(SKU_NOT_FOUND, f"SKU {sku} was not found.")
+    name, price_cents = entry
+
+    row = await fastdb.fetchrow(fastdb.SCAN, tx_id, price_cents, sku)
+    if row is None:
+        status = await fastdb.fetchrow(fastdb.STATUS, tx_id)
+        if status is None:
+            raise ApiError(TRANSACTION_NOT_FOUND, f"Transaction {public_id(tx_id)} was not found.")
+        raise ApiError(
+            TRANSACTION_NOT_OPEN, f"Transaction {public_id(tx_id)} is already {status['status'].lower()}."
+        )
+    return {
+        "transactionId": public_id(tx_id),
+        "sku": sku,
+        "name": name,
+        "unitPrice": cents_to_amount(price_cents),
+        "itemCount": row["item_count"],
+        "runningTotal": cents_to_amount(row["running_total_cents"]),
     }
 
 

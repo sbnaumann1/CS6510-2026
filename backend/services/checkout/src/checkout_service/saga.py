@@ -33,6 +33,7 @@ from checkout_web.errors import (
 from checkout_web.events import CHECKOUT_COMPLETIONS
 from checkout_web.money import cents_to_amount
 from checkout_web.request import log_step
+from checkout_web.trace import trace
 
 ROLLED_BACK = (INTERNAL_ERROR[0], 503)
 
@@ -161,7 +162,9 @@ async def complete(tx_id: int) -> dict[str, Any]:
     public = public_id(tx_id)
     started = time.monotonic()
 
+    trace("co-complete-start", public)
     begun = await _begin(tx_id, public)
+    trace("co-begin-committed", public)
     if isinstance(begun, _Compensating):
         # The shopper is retrying after a refusal whose rollback could not be delivered
         # (Inventory was down). Finish that rollback, then start a fresh attempt; if the
@@ -201,6 +204,7 @@ async def complete(tx_id: int) -> dict[str, Any]:
         raise ApiError(ROLLED_BACK, "The completion was rolled back; retry.")
     log_step("reserve", tx=public, outcome="ok", elapsed_ms=(time.monotonic() - t0) * 1000)
     await _set_state(tx_id, "RESERVED")
+    trace("co-reserved-state", public)
 
     # Step 3: finalize locally.
     t0 = time.monotonic()
@@ -218,6 +222,7 @@ async def complete(tx_id: int) -> dict[str, Any]:
                 raise ApiError(ROLLED_BACK, "The completion was rolled back; retry.")
             completed_at = await repo.get_completed_at(session, tx_id)
     log_step("finalize", tx=public, outcome="ok", elapsed_ms=(time.monotonic() - t0) * 1000)
+    trace("co-finalized", public)
 
     snapshot = catalog_snapshot.get_snapshot()
     if basket:
@@ -225,6 +230,7 @@ async def complete(tx_id: int) -> dict[str, Any]:
             await snapshot.get(basket[0].sku)  # warm the names after a restart
         except UpstreamUnavailable:
             pass  # names fall back to the SKU; the receipt is still correct
+    trace("co-complete-done", public)
     return {
         "transactionId": public,
         "stationId": tx.station_id,

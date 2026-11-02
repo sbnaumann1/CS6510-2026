@@ -44,6 +44,7 @@ from checkout_web.events import (
     make_event,
 )
 from checkout_web.request import log_step
+from checkout_web.trace import trace
 
 log = logging.getLogger("checkout")
 
@@ -94,6 +95,9 @@ class StockEvents:
     def __init__(self, bus: Bus) -> None:
         self._bus = bus
         self._waiters: dict[tuple[int, int], list[tuple[frozenset[str], asyncio.Future]]] = {}
+        # Transaction numbers with at least one waiter in this process, so a reply that belongs
+        # to another worker is dropped from its key alone, without decoding it.
+        self._active: dict[int, int] = {}
         self._consumer = None
 
     @property
@@ -108,14 +112,25 @@ class StockEvents:
         await self._consumer.start()
         while True:
             for rec in await self._consumer.poll(200):
+                if not self._wanted(rec):
+                    continue
                 try:
-                    self._dispatch(decode(rec.value))
+                    self._dispatch(decode(rec.value), rec)
                 except EventDecodeError:
                     continue
                 except Exception:
                     log.exception("reply dispatch failed")
 
-    def _dispatch(self, event: Event) -> None:
+    def _wanted(self, rec) -> bool:
+        """False when the record's key (the transaction id) has no waiter here. Every worker
+        reads every reply but only one owns it, so this skips the decode for the rest. A key
+        that does not parse falls through to the full decode."""
+        try:
+            return _tx_number(rec.key) in self._active
+        except (AttributeError, ValueError, IndexError):
+            return True
+
+    def _dispatch(self, event: Event, rec=None) -> None:
         data = event.data
         try:
             key = (_tx_number(data["transactionId"]), int(data["epoch"]))
@@ -123,6 +138,7 @@ class StockEvents:
             return
         for accepts, fut in self._waiters.get(key, ()):
             if event.type in accepts and not fut.done():
+                trace("co-reply-dispatched", data["transactionId"], kafka_ts=getattr(rec, "timestamp_ms", 0))
                 fut.set_result(event)
 
     # ---- the two asks ------------------------------------------------------------------
@@ -165,7 +181,9 @@ class StockEvents:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         entry = (accepts, fut)
         self._waiters.setdefault(key, []).append(entry)
+        self._active[key[0]] = self._active.get(key[0], 0) + 1
         t0 = time.monotonic()
+        trace("co-ask-start", public_id)
         publishes: list[asyncio.Task] = []
         replied = False
         try:
@@ -185,6 +203,7 @@ class StockEvents:
                 if not done:
                     continue
                 reply = fut.result()
+                trace("co-reply-resumed", public_id)
                 replied = True  # publishes still finishing (marking the outbox row) are left to finish
                 log_step("await", outcome="ok", tx=public_id, reply=reply.type,
                          elapsed_ms=(time.monotonic() - t0) * 1000)
@@ -200,6 +219,11 @@ class StockEvents:
                 waiting.remove(entry)
             if not waiting:
                 self._waiters.pop(key, None)
+            left = self._active.get(key[0], 0) - 1
+            if left > 0:
+                self._active[key[0]] = left
+            else:
+                self._active.pop(key[0], None)
 
     async def _republish(self, public_id: str, event: Event, step: str, attempt: int) -> None:
         try:

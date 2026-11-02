@@ -18,6 +18,7 @@ from checkout_service.db import AutocommitSessionLocal, SessionLocal
 from checkout_web.bus import Transient
 from checkout_web.events import Event, from_dict
 from checkout_web.request import log_step
+from checkout_web.trace import trace
 
 log = logging.getLogger("checkout")
 
@@ -30,11 +31,13 @@ RETAIN_HOURS = 1
 async def publish_now(topic: str, key: str, event: Event) -> bool:
     """Fast path, after COMMIT: publish and mark the row. Never raises; False means the
     sweeper will deliver it."""
+    trace("co-publish-start", key, type=event.type)
     try:
         await eventbus.get_bus().publish(topic, event, key=key)
     except Transient as exc:
         log_step("publish", outcome="deferred", tx=key, topic=topic, type=event.type, error=str(exc))
         return False
+    trace("co-publish-acked", key, type=event.type)
     try:
         async with AutocommitSessionLocal() as session:
             await repo.mark_published(session, event.event_id)

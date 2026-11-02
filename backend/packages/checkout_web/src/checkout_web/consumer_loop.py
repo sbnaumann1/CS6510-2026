@@ -25,6 +25,7 @@ import orjson
 from checkout_web.bus import Bus, BrokerUnavailable, Consumer, Record, Transient
 from checkout_web.events import DEAD_LETTER, DEAD_LETTERS, EventDecodeError, make_event
 from checkout_web.request import _request_id, log_step, new_request_id
+from checkout_web.trace import trace
 
 log = logging.getLogger("checkout.consumer")
 
@@ -49,6 +50,7 @@ async def run_consumer(
         records = await consumer.poll(poll_ms)
         if not records:
             continue
+        trace("consume-polled", name=name, n=len(records))
         groups: dict[tuple[int, str | None], list[Record]] = defaultdict(list)
         for rec in records:
             groups[(rec.partition, rec.key)].append(rec)
@@ -61,7 +63,9 @@ async def run_consumer(
                     )
 
         await asyncio.gather(*(run_group(g) for g in groups.values()))
+        trace("consume-batch-handled", name=name, n=len(records))
         await consumer.commit()
+        trace("consume-committed", name=name, n=len(records))
 
 
 async def _handle_one(

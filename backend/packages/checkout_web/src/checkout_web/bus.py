@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import os
 import zlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
@@ -28,6 +29,16 @@ log = logging.getLogger("checkout.bus")
 #   "end"        records published after the consumer was created
 #   <int n>      the last n records of each partition (a bounded replay)
 Start = str | int
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    return default if raw is None or raw == "" else int(raw)
+
+
+def _acks():
+    raw = os.getenv("KAFKA_ACKS", "all")
+    return raw if raw == "all" else int(raw)
 
 
 class Transient(Exception):
@@ -47,6 +58,7 @@ class Record:
     key: str | None
     value: bytes
     headers: dict[str, str] = field(default_factory=dict)
+    timestamp_ms: int = 0  # the producer's create time (Kafka record timestamp); 0 if unknown
 
     def event(self) -> Event:
         """Decode the body. Raises EventDecodeError for a poison record."""
@@ -122,13 +134,13 @@ class KafkaBus:
             producer = AIOKafkaProducer(
                 bootstrap_servers=self._bootstrap,
                 client_id=self._client_id,
-                acks="all",
+                acks=_acks(),
                 # Not idempotent, on purpose. Delivery is at-least-once by design (every consumer
                 # is idempotent), and aiokafka's idempotent producer wedges for good with
                 # OutOfOrderSequenceNumber after the broker restarts under load (found by
                 # scripts/check_broker_outage.sh). `_reset_producer` is the safety net.
                 enable_idempotence=False,
-                linger_ms=2,
+                linger_ms=_int_env("KAFKA_LINGER_MS", 2),
                 request_timeout_ms=5000,
             )
             try:
@@ -272,6 +284,8 @@ class KafkaConsumer:
             request_timeout_ms=10000,
             session_timeout_ms=10000,
             heartbeat_interval_ms=3000,
+            fetch_max_wait_ms=_int_env("KAFKA_FETCH_MAX_WAIT_MS", 500),
+            fetch_min_bytes=_int_env("KAFKA_FETCH_MIN_BYTES", 1),
         )
         try:
             await consumer.start()
@@ -330,6 +344,7 @@ class KafkaConsumer:
                         key=m.key.decode() if m.key is not None else None,
                         value=m.value,
                         headers={k: v.decode() for k, v in (m.headers or [])},
+                        timestamp_ms=m.timestamp or 0,
                     )
                 )
         return out

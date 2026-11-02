@@ -48,6 +48,10 @@ class Settings:
     # Keep workers x pool below this database's max_connections (compose-topology.md).
     db_pool_size: int = _int("DB_POOL_SIZE", 10)
     workers: int = _int("WORKERS", 6)
+    # The hot path (start and scan) talks to PostgreSQL through its own asyncpg pool; keep
+    # workers x (db_pool_size + fast_pool_size) below the database's max_connections.
+    fast_pool_size: int = _int("CHECKOUT_FAST_POOL_SIZE", 10)
+    fast_path: bool = os.getenv("CHECKOUT_FASTPATH", "1") == "1"
 
     @property
     def sync_database_url(self) -> str:

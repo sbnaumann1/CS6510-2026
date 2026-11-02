@@ -106,7 +106,12 @@ def log_step(
 
 
 async def _json_body(request: Request, *, required: bool) -> dict[str, Any]:
-    raw = await request.body()
+    return parse_json_body(await request.body(), required=required)
+
+
+def parse_json_body(raw: bytes, *, required: bool) -> dict[str, Any]:
+    """The request body as a JSON object, with the contract's INVALID_REQUEST errors.
+    Shared by the FastAPI routes and the raw-ASGI hot path, so both answer identically."""
     if not raw:
         if required:
             raise ApiError(INVALID_REQUEST, "A JSON body is required.")

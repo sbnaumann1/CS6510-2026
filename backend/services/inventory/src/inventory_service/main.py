@@ -14,12 +14,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from checkout_web import diagnostics
 from checkout_web.app import create_service_app
 from checkout_web.lifecycle import cancel_and_wait
 from checkout_web.bus import Bus, KafkaBus
 from inventory_service import api, catalog_snapshot, eventbus, handlers, internal_reports, outbox
 from inventory_service.config import settings
-from inventory_service.db import dispose_engine, ping
+from inventory_service.db import dispose_engine, engine, ping
 
 
 log = logging.getLogger("inventory")
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
         log.warning("database not reachable yet; will retry on first use")
     bus = KafkaBus(settings.kafka_bootstrap, client_id="inventory")
     tasks = await start_background(bus)
+    tasks.append(asyncio.create_task(diagnostics.monitor(engine), name="diagnostics"))
     try:
         yield
     finally:

@@ -251,6 +251,80 @@ so a reserve is always seen before its release.
 Full outcome table and timing budget:
 [`completion-flow.md`](./specs/008-event-driven-kafka/contracts/completion-flow.md).
 
+### Where the time goes in one completion
+
+Measured with the wall-clock trace points (`TRACE_TIMING=1`, `scripts/profile_completion.py`)
+over the unmodified Java load client, 30 s runs, stock raised so no basket is refused. Each
+number is the **mean** for that step; the steps run one after another, so they add up to the
+mean time inside Checkout's saga (`complete()`), about 23.6 ms at 10 stations.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Checkout (worker)
+    participant CD as checkout-db
+    participant K as Kafka
+    participant I as Inventory (worker)
+    participant ID as inventory-db
+
+    C->>CD: begin: lock tx, read basket, COMPLETING, outbox row
+    Note over C,CD: 3.6 ms (stress: 24.6)
+    Note over C: schedule the publish: 0.2 ms (stress: 1.1)
+    C->>K: stock-reservation-requested (producer ack: 3.7 ms of the next step)
+    K->>I: wait for the record, then the poll hands it to a handler
+    Note over C,I: publish start to handler start: 9.3 ms (stress: 88.8)<br/>includes the producer ack, linger and any queueing at Inventory
+    I->>ID: reserve stock, write the reply to the outbox
+    Note over I,ID: 2.6 ms (stress: 13.7)
+    I->>K: stock-reserved (producer ack)
+    Note over I,K: 3.3 ms (stress: 5.8)
+    K->>C: reply seen by Checkout's reply consumer
+    Note over K,C: 0.9 ms (stress: 15.2)
+    Note over C: waiter wakes the request: 0.3 ms (stress: 2.6)
+    C->>CD: set completion RESERVED
+    Note over C,CD: 1.8 ms (stress: 15.4)
+    C->>CD: finalize: COMPLETING to COMPLETED
+    Note over C,CD: 1.7 ms (stress: 14.9)
+    Note over C: build the receipt: 0.04 ms
+```
+
+| # | Step | 10 stations | 100 stations | Share at 10 / 100 |
+| --- | --- | --- | --- | --- |
+| 1 | Checkout `begin` transaction | 3.6 ms | 24.6 ms | 15 % / 14 % |
+| 2 | Schedule the publish | 0.2 ms | 1.1 ms | 1 % / 1 % |
+| 3 | **Publish start → Inventory handler start** | **9.3 ms** | **88.8 ms** | **39 % / 49 %** |
+| 4 | Inventory database transaction (the reserve statement) | 2.6 ms | 13.7 ms | 11 % / 8 % |
+| 5 | Inventory publishes the reply (ack) | 3.3 ms | 5.8 ms | 14 % / 3 % |
+| 6 | Reply reaches Checkout's consumer | 0.9 ms | 15.2 ms | 4 % / 8 % |
+| 7 | Waiter resumes the request | 0.3 ms | 2.6 ms | 1 % / 1 % |
+| 8 | Checkout sets `RESERVED` | 1.8 ms | 15.4 ms | 8 % / 9 % |
+| 9 | Checkout finalizes | 1.7 ms | 14.9 ms | 7 % / 8 % |
+| 10 | Receipt | 0.04 ms | 0.07 ms | 0 % / 0 % |
+| | **Sum of the steps** | **23.7 ms** | **182.0 ms** | |
+| | Measured mean inside the saga | 23.6 ms | 181.0 ms | |
+| | Load client's `COMPLETE` mean (adds the gateway and HTTP) | 24.8 ms | 185.9 ms | |
+
+Reading it:
+- **Step 3 is the largest at both loads.** At 10 stations it is mostly the producer ack (3.7 ms) plus the hop to Inventory's poll. At 100 stations most of it is a record **waiting in the topic** while Inventory finishes an earlier batch, not Kafka transit: once a batch is polled, a record waits only 12 ms for its handler.
+- **Steps 1, 8 and 9 are Checkout's three database transactions** (7.1 ms at 10 stations). Under load they grow about 8× together, which points at a shared resource, not one slow query.
+- **Not on the path:** Inventory's "mark outbox row published" write (1.1 ms) and Checkout's equivalent run after the reply is on its way, so they delay nothing the shopper waits for, though in Inventory the write holds a handler slot until it finishes.
+- The raw logs and per-config breakdowns are in `logs/profile/`, run with `./scripts/run_profile.sh`.
+
+### Performance work (spec 009)
+
+The completion path above, the profiling tooling that produced it (`TRACE_TIMING=1`,
+`scripts/run_profile.sh`) and every experiment, including what did not help, are written up in
+[`docs/009-optimization-findings.md`](./docs/009-optimization-findings.md). What shipped:
+
+- **Scan fast path** (`checkout_service/hotpath.py`, `fastdb.py`): start and scan are served by
+  raw-ASGI handlers in front of FastAPI and run their single statement through a bare asyncpg
+  pool. Same contract, same errors; `tests/integration/test_hotpath.py` checks each request
+  against the FastAPI route. `CHECKOUT_FASTPATH=0` switches it off.
+- Checkout's Kafka producer lingers 0 ms; replies are filtered by record key before decoding; the
+  gateway recycles Checkout upstream connections after 200 requests.
+- Graded result against the Week 8 code in the same session: **180.3 tx/s** at 10 stations
+  (+12.5 %) and **168.0 tx/s** at 100 (+9.8 %); see
+  [`load-client/reports/009-kafka-optimization/`](../load-client/reports/009-kafka-optimization/README.md).
+
 ## Analytics: an in-memory pipeline fed by the scan topic
 
 ```text

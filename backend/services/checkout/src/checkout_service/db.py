@@ -10,8 +10,10 @@ from typing import AsyncIterator
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from checkout_service.config import settings
+from checkout_web import diagnostics
 
 engine: AsyncEngine = create_async_engine(
     settings.database_url,
@@ -20,6 +22,7 @@ engine: AsyncEngine = create_async_engine(
     pool_pre_ping=False,
     future=True,
     query_cache_size=1200,
+    **diagnostics.pool_kwargs(AsyncAdaptedQueuePool),
 )
 
 SessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(

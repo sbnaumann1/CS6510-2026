@@ -185,6 +185,9 @@ async def _dispose_engines_per_loop():
         await checkout_ping()
         await inventory_ping()
     yield
+    from checkout_service import fastdb
+
+    await fastdb.close()
     await checkout_engine.dispose()
     await inventory_engine.dispose()
 

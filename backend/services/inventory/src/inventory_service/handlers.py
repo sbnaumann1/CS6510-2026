@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError
@@ -38,6 +39,7 @@ from checkout_web.events import (
     make_event,
 )
 from checkout_web.request import log_step
+from checkout_web.trace import trace
 from inventory_service import outbox, repo
 from inventory_service import reserve as reservations
 from inventory_service.config import settings
@@ -47,7 +49,7 @@ log = logging.getLogger("inventory")
 
 PRODUCER = "inventory"
 GROUP = "inventory"
-CONCURRENCY = 6  # below the connection pool, leaving room for the report endpoint
+CONCURRENCY = int(os.getenv("INVENTORY_CONCURRENCY", "6"))  # below the connection pool, leaving room for the report endpoint
 MAX_ATTEMPTS = 5  # a handler that keeps failing is dead-lettered after this many tries
 BACKOFF_S = 0.2  # doubling between tries
 
@@ -129,6 +131,8 @@ async def handle(rec: Record) -> None:
     consumer loop waits instead of dead-lettering."""
     request = rec.event()  # EventDecodeError -> dead letter
     started = time.monotonic()
+    tx = request.data.get("transactionId")
+    trace("inv-handle-start", tx, kafka_ts=rec.timestamp_ms, epoch=request.data.get("epoch"))
     if request.type == STOCK_RESERVATION_REQUESTED:
         step, work = "reserve", handle_reservation
     elif request.type == STOCK_RELEASE_REQUESTED:
@@ -143,7 +147,9 @@ async def handle(rec: Record) -> None:
         raise
     log_step(step, outcome=outcome.type.split(".", 1)[1], tx=request.data["transactionId"],
              elapsed_ms=(time.monotonic() - started) * 1000)
+    trace("inv-db-committed", tx, epoch=request.data.get("epoch"))
     await outbox.publish_now(INVENTORY_STOCK, request.data["transactionId"], outcome)
+    trace("inv-handle-done", tx, epoch=request.data.get("epoch"))
 
 
 async def run(bus: Bus) -> None:
