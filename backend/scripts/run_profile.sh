@@ -14,6 +14,7 @@
 #
 # Configs (each changes only what it names, relative to baseline = today's defaults):
 #   baseline    nothing
+#   nofast      CHECKOUT_FASTPATH=0: start and scan through FastAPI + SQLAlchemy (the pre-spec-009-fastpath code)
 #   lowlinger   producer linger_ms 2 -> 0                                        (step 2)
 #   acks1       producer acks all -> 1 (single broker: no durability lost to replicas)  (step 2)
 #   fetch       consumer fetch_max_wait_ms 500 -> 20                             (step 2)
@@ -27,7 +28,7 @@ CLIENT="$BACKEND/../load-client"
 OUT="$BACKEND/logs/profile"
 DEFAULT_SECONDS="${DEFAULT_SECONDS:-60}"
 STRESS_SECONDS="${STRESS_SECONDS:-60}"
-ALL=(baseline lowlinger acks1 fetch invscale combined pool10)
+ALL=(baseline nofast lowlinger acks1 fetch invscale combined pool10)
 CONFIGS=("$@"); [ ${#CONFIGS[@]} -gt 0 ] || CONFIGS=("${ALL[@]}")
 
 docker info >/dev/null 2>&1 || { echo "Docker is not running." >&2; exit 1; }
@@ -37,9 +38,10 @@ cd "$BACKEND"
 
 set_config() {  # exports the env for one config
   unset KAFKA_LINGER_MS KAFKA_ACKS KAFKA_FETCH_MAX_WAIT_MS INVENTORY_WORKERS \
-        INVENTORY_CONCURRENCY INVENTORY_DB_POOL_SIZE CHECKOUT_DB_POOL_SIZE
+        INVENTORY_CONCURRENCY INVENTORY_DB_POOL_SIZE CHECKOUT_DB_POOL_SIZE CHECKOUT_FASTPATH
   case "$1" in
     baseline) ;;
+    nofast) export CHECKOUT_FASTPATH=0 ;;
     lowlinger) export KAFKA_LINGER_MS=0 ;;
     acks1) export KAFKA_ACKS=1 ;;
     fetch) export KAFKA_FETCH_MAX_WAIT_MS=20 ;;

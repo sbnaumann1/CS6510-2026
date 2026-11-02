@@ -15,6 +15,8 @@ from fastapi import FastAPI
 
 from checkout_service import (
     api,
+    fastdb,
+    hotpath,
     catalog_snapshot,
     eventbus,
     internal_reports,
@@ -75,6 +77,8 @@ async def lifespan(app: FastAPI):
     # pool's first connections.
     try:
         await ping()
+        if settings.fast_path:
+            await fastdb.warm()
     except Exception:
         log.warning("database not reachable yet; will retry on first use")
     bus = KafkaBus(settings.kafka_bootstrap, client_id="checkout")
@@ -89,6 +93,7 @@ async def lifespan(app: FastAPI):
     finally:
         await stop_background(tasks + events_tasks)
         await bus.stop()
+        await fastdb.close()
         await dispose_engine()
 
 
@@ -106,10 +111,12 @@ async def _sweep_loop() -> None:
             log.exception("sweeper failed")
 
 
-app = create_service_app(
+_fastapi_app = create_service_app(
     "checkout",
     [api.router, internal_reports.router],
     ping,
     lifespan,
     readiness=readiness,
 )
+# Start and scan are served by raw-ASGI handlers in front of the FastAPI app (hotpath.py).
+app = hotpath.HotPath(_fastapi_app) if settings.fast_path else _fastapi_app
