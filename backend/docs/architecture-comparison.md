@@ -254,15 +254,35 @@ Star ratings (1–5) are the author's judgement from the evidence in §1 (measur
 and the drills named below. Rows marked "measured" follow the numbers directly. The others are
 judgement. Weeks are rated at their optimized state.
 
+**Expected pattern.** The chart follows the shape FoSA predicts as a system is split into
+independently deployable parts: the characteristics that come from *separation* rise, and the
+ones that come from *being one thing* fall. Fault tolerance, modularity, deployability, elasticity
+and scalability rise, because failure domains, data and deployment units are separated. Week 4
+still has one shared PostgreSQL, so it remains a single point of failure, whereas week 5 gives
+each service its own store and week 6 removes direct peer calls (the independence, crash-recovery
+and broker-outage drills; coupling and shared-code share in §2). Per-service WORKERS and pool
+settings, and six partitions on the completions topic, give the later designs levers the
+monolith lacks. Simplicity, single-machine performance and whole-system testability fall, because
+separation adds moving parts and hops: SLOC grows 4.7×, from 19 files to 72, from 1 to 5 deployable
+parts plus a broker (§2), and default tx/s falls from 328 to 180 while the COMPLETE mean rises
+from 2.4 to 19.5 ms (§1). Testing each service alone gets easier, but testing the system needs a
+compose stack and a broker (failure suite, real-broker tests and chaos drills), so the
+whole-system rating drops. Data consistency also weakens, from single-transaction guarantees to a
+saga (week 5) and eventual consistency with an outbox (week 6). The one place the benchmark
+cannot confirm the rise is scalability, since every run is on a single host (§1). That rating is
+architectural, supported by the stress ÷ default completion-attempts-per-second ratio (computed
+from the §1 reports; to be added as a §1 table) rising from about 1.2 to 1.5, which shows the
+later designs gain more from added concurrency.
+
 | Characteristic | 1 Monolith | 2 Layered | 3 Pipelined | 4 Service-based | 5 Microservices | 6 Event-driven |
 | --- | --- | --- | --- | --- | --- | --- |
 | Deployability | ★ | ★ | ★ | ★★★ | ★★★★ | ★★★★ |
 | Elasticity | ★ | ★ | ★ | ★★★ | ★★★★ | ★★★★★ |
-| Scalability (measured, §1) | ★★★★ | ★★★★ | ★★★★ | ★★ | ★★ | ★★ (★★★★ by design) |
+| Scalability (architectural capacity) | ★★ | ★★ | ★★ | ★★★ | ★★★★ | ★★★★★ |
 | Availability / fault tolerance | ★ | ★ | ★★ | ★★ | ★★★★ | ★★★★★ |
 | Performance (latency, §1) | ★★★★★ | ★★★★★ | ★★★★★ | ★★★ | ★★★ | ★★ |
 | Simplicity | ★★★★★ | ★★★★ | ★★★ | ★★★ | ★★ | ★ |
-| Testability | ★★ | ★★★★ | ★★★★ | ★★★ | ★★★★ | ★★★ |
+| Testability (whole system) | ★★ | ★★★★ | ★★★★ | ★★★ | ★★★ | ★★ |
 | Modularity / evolvability (coupling, §2) | ★★ | ★★★ | ★★★★ | ★★★ | ★★★★★ | ★★★★ |
 | Maintainability (CC, MI, LCOM4, size; §2) | ★★★★ | ★★★★★ | ★★★★ | ★★★★ | ★★★ | ★★ |
 | Data consistency | ★★★★★ | ★★★★★ | ★★★★★ | ★★★★★ | ★★★ (saga) | ★★★ (eventual, outbox) |
