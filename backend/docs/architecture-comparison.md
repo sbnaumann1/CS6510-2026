@@ -274,6 +274,33 @@ architectural, supported by the stress ÷ default completion-attempts-per-second
 from the §1 reports; to be added as a §1 table) rising from about 1.2 to 1.5, which shows the
 later designs gain more from added concurrency.
 
+**Less expected trends.** Several results do not follow the textbook story.
+*Maintainability falls even as modularity rises.* Separating the system is usually expected to
+make it easier to change, yet the maintainability index drops from 86.9 (week 2) to 79.0 (week 6),
+the count of functions with cyclomatic complexity above 10 grows from 1 to 6, and 5 of the 19
+classes in week 6 split into more than one cohesion group (§2). Modularity bought independent
+deployment, not simpler code: the added code is plumbing (saga, outbox, relay, bus, consumers),
+and the worst file (`checkout_web/bus.py`, MI 17.8) is in the shared messaging library.
+*Coupling moves instead of shrinking.* It is not monotonic even at import level: week 4 is more
+coupled than week 3, because all four "services" import a shared data layer holding 49 % of the
+code, then week 5 drops that to 11 %, and week 6 raises it to 25 % when the messaging library
+grows 3.7×; wire-level coupling goes from a shared database to five HTTP edges to twelve event
+schemas (§2). *Complexity lives in structure, not in functions.* Mean cyclomatic complexity
+barely changes (1.6 to 2.4), so the growth in size (4.7×) and in parts is not visible function
+by function. *The biggest early performance drop is not the style.* Moving to services (week 4) cost
+about 30 % of throughput, but the spec 006 investigation attributes it mostly to Docker Desktop
+port forwarding (about 44 %) and VM overhead (about 52 %), and the same code run natively matched
+the monolith (827 against 818 tx/s) (§1). *Cheap structure, expensive plumbing.* Layering (week 2)
+and the pipeline (week 3) had no measurable run-time cost, while the layered code scored best on
+maintainability; and the pipeline added 25 % more code. *Rejections do not get cheaper.* One might
+expect an event-driven refusal to be lighter than a completion, but Inventory takes 21.4 ms to refuse
+against 10.3 ms to reserve in week 6, so the stress-to-default tx/s ratio converging on parity
+(0.84 to 0.96) comes from stress completing more attempts per second, offset by its higher
+refusal rate, not from cheaper refusals (§1). Finally, *optimization pulls against uniformity*:
+the 009 scan fast path replaced FastAPI and SQLAlchemy sessions with raw-ASGI handlers and a
+bare asyncpg pool to cut Checkout CPU by about 30 %, so week 6's fastest path is also its least
+conventional code.
+
 | Characteristic | 1 Monolith | 2 Layered | 3 Pipelined | 4 Service-based | 5 Microservices | 6 Event-driven |
 | --- | --- | --- | --- | --- | --- | --- |
 | Deployability | ★ | ★ | ★ | ★★★ | ★★★★ | ★★★★ |
